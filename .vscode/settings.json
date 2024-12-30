@@ -5,6 +5,15 @@
         "interface/ftdi/esp32_devkitj_v1.cfg",
         "target/esp32s2.cfg"
     ],
-    "idf.portWin": "COM19",
-    "idf.toolsPathWin": "C:\\Users\\dericc\\.espressif"
+    "idf.portWin": "COM16",
+    "idf.toolsPathWin": "C:\\Users\\dericc\\.espressif",
+    "files.associations": {
+        "max7219.h": "c",
+        "spi_master.h": "c",
+        "encoder.h": "c",
+        "button.h": "c",
+        "matrix_keyboard.h": "c",
+        "random": "c"
+    },
+    "idf.flashType": "UART"
 }

@@ -1,0 +1,10 @@
+dependencies:
+  idf:
+    version: '>5.0.0'
+description: ESP32 driver for MAX7219 / MAX7221 serially interfaced, 8-digit, LED
+  display drivers.
+documentation: https://gilleszunino.github.io/esp32-maxim-7219-7221/components/max7219_7221/README.html
+license: MIT
+repository: https://github.com/GillesZunino/esp32-maxim-7219-7221
+url: https://gilleszunino.github.io/esp32-maxim-7219-7221/README.html
+version: 1.0.2
