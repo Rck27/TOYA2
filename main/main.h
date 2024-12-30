@@ -23,3 +23,7 @@ int led_index[4][4] = {
 };
 
 int get_led_index(int , int);
+static void generate_new_question(int *num1, int *num2, char *operator, int *correct_answer);
+
+static int calculate_answer(int num1, int num2, char operator);
+static char generate_operator(void);
