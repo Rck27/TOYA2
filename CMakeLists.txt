@@ -9,5 +9,8 @@ add_definitions(
 -DARDUINO_USB_CDC_ON_BOOT
 )
 
+# spiffs_create_partition_image(storage spiffs_image FLASH_IN_PROJECT)
+
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(toya)
