@@ -2,10 +2,9 @@
     "C_Cpp.intelliSenseEngine": "default",
     "idf.espIdfPathWin": "c:\\Users\\Dericc\\esp\\esp-idf",
     "idf.openOcdConfigs": [
-        "interface/ftdi/esp32_devkitj_v1.cfg",
-        "target/esp32s2.cfg"
+        "board/esp32-wrover-kit-3.3v.cfg"
     ],
-    "idf.portWin": "COM16",
+    "idf.portWin": "COM36",
     "idf.toolsPathWin": "C:\\Users\\dericc\\.espressif",
     "files.associations": {
         "max7219.h": "c",
@@ -13,7 +12,9 @@
         "encoder.h": "c",
         "button.h": "c",
         "matrix_keyboard.h": "c",
-        "random": "c"
+        "random": "c",
+        "task.h": "c",
+        "gpio.h": "c"
     },
     "idf.flashType": "UART"
 }

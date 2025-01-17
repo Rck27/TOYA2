@@ -2,339 +2,456 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "button.h"
-#include "matrix_keyboard.h"
+#include "driver/gpio.h"
+
+// #include "button.h"
+// #include "matrix_keyboard.h"
 #include "max7219.h"
 #include "driver/i2s.h"
 #include "esp_mac.h"
 #include "esp_spiffs.h"
 
+#include "driver/rmt_tx.h"
+#include "led_strip_encoder.h"
+
+
 #include "esp_random.h"
 #include "esp_system.h"
 #include "string.h"
 #include "main.h"
-#include "led.c"
+// #include "led.c"
+
+#define NUM_ROWS 5
+#define NUM_COLS 3
+
+const gpio_num_t row_pins[NUM_ROWS] = {GPIO_NUM_36, GPIO_NUM_39, GPIO_NUM_34, GPIO_NUM_35, GPIO_NUM_21};
+const gpio_num_t col_pins[NUM_COLS] = {GPIO_NUM_32, GPIO_NUM_33, GPIO_NUM_25};
+
+void configure_pins(const gpio_num_t *pins, size_t num_pins, gpio_mode_t mode, gpio_pullup_t pull_up, gpio_pulldown_t pull_down, gpio_int_type_t intr_type) {
+    for (size_t i = 0; i < num_pins; i++) {
+        gpio_config_t config = {
+            .pin_bit_mask = (1ULL << pins[i]), // Create a bitmask for the pin
+            .mode = mode,
+            .pull_up_en = pull_up,
+            .pull_down_en = pull_down,
+            .intr_type = intr_type
+        };
+        gpio_config(&config);
+    }
+}
+
+void gpio_init(){
+    configure_pins(col_pins, NUM_COLS, GPIO_MODE_OUTPUT, GPIO_PULLUP_DISABLE, GPIO_PULLDOWN_ENABLE, GPIO_INTR_DISABLE);
+    configure_pins(row_pins, NUM_ROWS, GPIO_MODE_INPUT, GPIO_PULLUP_DISABLE, GPIO_PULLDOWN_ENABLE, GPIO_INTR_NEGEDGE);
+}
+
+void gpio_task(){
+    static int rowsCnt, colsCnt = 0;
+    gpio_init();
+    // gpio_set_level(col_pins[1], 1);
+
+    while(1){
+        // ESP_LOGI("gpio", "get something %d", gpio_get_level(row_pins[1]));
+        while(colsCnt < NUM_COLS){
+        gpio_set_level(col_pins[0], 1);
+        while(rowsCnt < NUM_ROWS){
+            // ESP_LOGI("gpio", "r%d c%d", rowsCnt, colsCnt);
+            ESP_LOGI("gpio", "r%d c%d %d", rowsCnt, colsCnt, gpio_get_level(row_pins[rowsCnt]));
+            rowsCnt++;
+            vTaskDelay(10 / portTICK_PERIOD_MS);
+        }
+        // gpio_set_level(col_pins[0], 0);
+        colsCnt = colsCnt > NUM_COLS ? 0 : colsCnt+1;
+        }
+        
+    }
+}
+
+
+
+
+
+#define MAX_LEDS 19
+
+const static char *TAG = "TOYA2";
+
+#define RMT_LED_STRIP_RESOLUTION_HZ 10000000 // 10MHz resolution, 1 tick = 0.1us (led strip needs a high resolution)
+#define RMT_LED_STRIP_GPIO_NUM      14
+
+static uint8_t led_strip_pixels[9 * 3];
+
 
 int num1, num2, correct_answer;
 char operator;
 char received_char;
 bool game_active = true;
-
-
-#define CONFIG_EXAMPLE_SCROLL_DELAY 200
-#define CONFIG_EXAMPLE_DELAY 500
-#define CONFIG_EXAMPLE_CASCADE_SIZE 4
-
-#define CONFIG_EXAMPLE_PIN_NUM_CLK GPIO_NUM_36
-#define CONFIG_EXAMPLE_PIN_NUM_MOSI GPIO_NUM_35
-#define CONFIG_EXAMPLE_PIN_CS GPIO_NUM_34
-
-
-#define HOST SPI2_HOST
-
 int display_buffer[4] = {0};
 
-static const uint64_t symbols[] = {
-    0x3c66666e76663c00, //0
-    0x7e1818181c181800, // digits
-    0x7e060c3060663c00,
-    0x3c66603860663c00,
-    0x30307e3234383000,
-    0x3c6660603e067e00,
-    0x3c66663e06663c00,
-    0x1818183030667e00,
-    0x3c66663c66663c00,
-    0x3c66607c66663c00, //9
-    0x0808087c08080800, //+ 10
-    0x0000007c00000000, // - 11
-    0x0042241818244200 //* 12
-    
-};
-// static const size_t symbols_size = sizeof(symbols) - sizeof(uint64_t) * CONFIG_EXAMPLE_CASCADE_SIZE;
 
-void task(void *pvParameter)
-{
-    // Configure SPI bus
-    spi_bus_config_t cfg = {
-       .mosi_io_num = CONFIG_EXAMPLE_PIN_NUM_MOSI,
-       .miso_io_num = -1,
-       .sclk_io_num = CONFIG_EXAMPLE_PIN_NUM_CLK,
-       .quadwp_io_num = -1,
-       .quadhd_io_num = -1,
-       .max_transfer_sz = 0,
-       .flags = 0
-    };
-    ESP_ERROR_CHECK(spi_bus_initialize(HOST, &cfg, 1));
-
-    // Configure device
-    max7219_t dev = {
-       .cascade_size = CONFIG_EXAMPLE_CASCADE_SIZE,
-       .digits = 0,
-       .mirrored = true
-    };
-    ESP_ERROR_CHECK(max7219_init_desc(&dev, HOST, MAX7219_MAX_CLOCK_SPEED_HZ, CONFIG_EXAMPLE_PIN_CS));
-    ESP_ERROR_CHECK(max7219_init(&dev));
-    // char buf[10]; // 8 digits + decimal point + \0
-// display_buffer[0] =  num1;
-//     display_buffer[1] = operator;
-//     display_buffer[2]  = num2;
-//     display_buffer[3]  = correct_answer;
-    while (1)
-    {   
-        for(int i = 0; i < CONFIG_EXAMPLE_CASCADE_SIZE; i++){
-            max7219_draw_image_8x8(&dev, i * 8, (uint8_t *)&symbols[display_buffer[i]]);
-            vTaskDelay(pdMS_TO_TICKS(CONFIG_EXAMPLE_SCROLL_DELAY));
-
-        }
-    //    printf("---------- draw\n");
-    //    for(int i = 0; i < 9; i++){
-    //     // max7219_clear(&dev);
-    //     max7219_draw_image_8x8(&dev, 2 * 8, (uint8_t *)&symbols[i]);
-    //    }
-        // max7219_draw_image_8x8(&dev, 1, (uint8_t *)symbols + 2 * 8);
-        // for (uint8_t c = 0; c < CONFIG_EXAMPLE_CASCADE_SIZE; c ++)
-            // max7219_draw_image_8x8(&dev, c * 8, (uint8_t *)symbols + c * 8 + offs);
-
-    }
-}
+rmt_channel_handle_t led_chan = NULL;
+rmt_encoder_handle_t led_encoder = NULL;
 
 
-const static char *TAG = "TOYA2";
+// void display_task(void *pvParameter)
+// {
+//     // Configure SPI bus
+//     spi_bus_config_t cfg = {
+//        .mosi_io_num = CONFIG_EXAMPLE_PIN_NUM_MOSI,
+//        .miso_io_num = -1,
+//        .sclk_io_num = CONFIG_EXAMPLE_PIN_NUM_CLK,
+//        .quadwp_io_num = -1,
+//        .quadhd_io_num = -1,
+//        .max_transfer_sz = 0,
+//        .flags = 0
+//     };
+//     ESP_ERROR_CHECK(spi_bus_initialize(HOST, &cfg, 1));
 
-QueueHandle_t keyboard_queue;
+//     // Configure device
+//     max7219_t dev = {
+//        .cascade_size = CONFIG_EXAMPLE_CASCADE_SIZE,
+//        .digits = 0,
+//        .mirrored = true
+//     };
+//     ESP_ERROR_CHECK(max7219_init_desc(&dev, HOST, MAX7219_MAX_CLOCK_SPEED_HZ, CONFIG_EXAMPLE_PIN_CS));
+//     ESP_ERROR_CHECK(max7219_init(&dev));
+
+//     while (1)
+//     {   
+//         for(int i = 0; i < CONFIG_EXAMPLE_CASCADE_SIZE; i++){
+//             max7219_draw_image_8x8(&dev, i * 8, (uint8_t *)&symbols[display_buffer[i]]);
+//             vTaskDelay(pdMS_TO_TICKS(CONFIG_EXAMPLE_SCROLL_DELAY));
+//         }
+//     }
+// }
 
 
-esp_err_t init_i2s(void) {
-    i2s_config_t i2s_config = {
-        .mode = I2S_MODE_MASTER | I2S_MODE_TX,
-        .sample_rate = SAMPLE_RATE,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .dma_buf_count = DMA_BUF_COUNT,
-        .dma_buf_len = DMA_BUF_LEN,
-        .use_apll = false,
-        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1
-    };
+// esp_err_t init_i2s(void) {
+//     i2s_config_t i2s_config = {
+//         .mode = I2S_MODE_MASTER | I2S_MODE_TX,
+//         .sample_rate = SAMPLE_RATE,
+//         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+//         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+//         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+//         .dma_buf_count = DMA_BUF_COUNT,
+//         .dma_buf_len = DMA_BUF_LEN,
+//         .use_apll = false,
+//         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1
+//     };
 
-    i2s_pin_config_t pin_config = {
-        .bck_io_num = I2S_BCK_IO,
-        .ws_io_num = I2S_WS_IO,
-        .data_out_num = I2S_DO_IO,
-        .data_in_num = I2S_PIN_NO_CHANGE
-    };
+//     i2s_pin_config_t pin_config = {
+//         .bck_io_num = I2S_BCK_IO,
+//         .ws_io_num = I2S_WS_IO,
+//         .data_out_num = I2S_DO_IO,
+//         .data_in_num = I2S_PIN_NO_CHANGE
+//     };
 
-    esp_err_t ret = i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
-    if (ret != ESP_OK) return ret;
+//     esp_err_t ret = i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
+//     if (ret != ESP_OK) return ret;
+//     return i2s_set_pin(I2S_NUM, &pin_config);
+// }
 
-    return i2s_set_pin(I2S_NUM, &pin_config);
-}
+// esp_err_t init_spiffs(void) {
+//     esp_vfs_spiffs_conf_t conf = {
+//         .base_path = "/spiffs",
+//         .partition_label = NULL,
+//         .max_files = 5,
+//         .format_if_mount_failed = true
+//     };
+//     return esp_vfs_spiffs_register(&conf);
+// }
 
-esp_err_t init_spiffs(void) {
-    esp_vfs_spiffs_conf_t conf = {
-        .base_path = "/spiffs",
-        .partition_label = NULL,
-        .max_files = 5,
-        .format_if_mount_failed = true
-    };
-    return esp_vfs_spiffs_register(&conf);
-}
+// void play_sound(uint8_t sound_number) {
+//     FILE* f = fopen(PCM_FILE_PATH, "rb");
+//     if (f == NULL) {
+//         printf("Failed to open file\n");
+//         return;
+//     }
 
-void play_sound(uint8_t sound_number) {
-    FILE* f = fopen(PCM_FILE_PATH, "rb");
-    if (f == NULL) {
-        printf("Failed to open file\n");
-        return;
-    }
+//     // Seek to the correct position in the file
+//     fseek(f, sound_number * SOUND_BLOCK_SIZE, SEEK_SET);
 
-    // Seek to the correct position in the file
-    fseek(f, sound_number * SOUND_BLOCK_SIZE, SEEK_SET);
+//     // Read and play the sound
+//     int16_t buffer[DMA_BUF_LEN];
+//     size_t bytes_read;
+//     size_t bytes_written;
+//     size_t bytes_remaining = SOUND_BLOCK_SIZE;
 
-    // Read and play the sound
-    int16_t buffer[DMA_BUF_LEN];
-    size_t bytes_read;
-    size_t bytes_written;
-    size_t bytes_remaining = SOUND_BLOCK_SIZE;
-
-    while (bytes_remaining > 0) {
-        // Read chunk from file
-        size_t chunk_size = (bytes_remaining < DMA_BUF_LEN * 2) ? 
-                            bytes_remaining : DMA_BUF_LEN * 2;
-        bytes_read = fread(buffer, 1, chunk_size, f);
+//     while (bytes_remaining > 0) {
+//         // Read chunk from file
+//         size_t chunk_size = (bytes_remaining < DMA_BUF_LEN * 2) ? 
+//                             bytes_remaining : DMA_BUF_LEN * 2;
+//         bytes_read = fread(buffer, 1, chunk_size, f);
         
-        if (bytes_read == 0) break;
+//         if (bytes_read == 0) break;
 
-        // Write to I2S
-        i2s_write(I2S_NUM, buffer, bytes_read, &bytes_written, portMAX_DELAY);
-        bytes_remaining -= bytes_read;
-    }
+//         // Write to I2S
+//         i2s_write(I2S_NUM, buffer, bytes_read, &bytes_written, portMAX_DELAY);
+//         bytes_remaining -= bytes_read;
+//     }
 
-    fclose(f);
-}
+//     fclose(f);
+// }
 
 
-int generate_random(int min, int max) {
-    return min + esp_random() % (max - min + 1);
-}
+// int generate_random(int min, int max) {
+//     return min + esp_random() % (max - min + 1);
+// }
 
-// Math game task
-void math_game_task(void *pvParameters) {
+// // Math game task
+// void math_game_task(void *pvParameters) {
     
-    keyboard_queue = xQueueCreate(10, sizeof(char));
+//     keyboard_queue = xQueueCreate(10, sizeof(char));
 
-    // Generate initial question
-    generate_new_question(&num1, &num2, &operator, &correct_answer);
+//     // Generate initial question
+//     generate_new_question(&num1, &num2, &operator, &correct_answer);
     
 
-    while(game_active) {
-        // Display current question
-        printf("\nSolve: %d %c %d = ?\n", num1, operator, num2);
+//     while(game_active) {
+//         // Display current question
+//         printf("\nSolve: %d %c %d = ?\n", num1, operator, num2);
         
-        bool question_active = true;
-        while(question_active) {
-            // Wait for character from keyboard queue
-            if(xQueueReceive(keyboard_queue, &received_char, portMAX_DELAY) == pdTRUE) {
-                if(received_char == 'M') {
-                    generate_new_question(&num1, &num2, &operator, &correct_answer);
-                    printf("new question is generated");
-                }
-                int user_answer = received_char - '0'; // Convert ASCII to integer
+//         bool question_active = true;
+//         while(question_active) {
+//             // Wait for character from keyboard queue
+//             if(xQueueReceive(keyboard_queue, &received_char, portMAX_DELAY) == pdTRUE) {
+//                 if(received_char == 'M') {
+//                     generate_new_question(&num1, &num2, &operator, &correct_answer);
+//                     printf("new question is generated");
+//                 }
+//                 int user_answer = received_char - '0'; // Convert ASCII to integer
                 
-                if(user_answer == correct_answer) {
-                    printf("\nCorrect! Well done!\n");
-                    // Generate new question only after correct answer
-                    generate_new_question(&num1, &num2, &operator, &correct_answer);
-                    question_active = false;
-                } else {
-                    printf("\nIncorrect. Try again!\n");
-                }
+//                 if(user_answer == correct_answer) {
+//                     printf("\nCorrect! Well done!\n");
+//                     // Generate new question only after correct answer
+//                     generate_new_question(&num1, &num2, &operator, &correct_answer);
+//                     question_active = false;
+//                 } else {
+//                     printf("\nIncorrect. Try again!\n");
+//                 }
                 
-                // Small delay for readability
-                vTaskDelay(pdMS_TO_TICKS(1000));
-            }
-        }
-    }
-}
+//                 // Small delay for readability
+//                 vTaskDelay(pdMS_TO_TICKS(1000));
+//             }
+//         }
+//     }
+// }
 
-// Helper function to generate a new question
-static void generate_new_question(int *num1, int *num2, char *operator, int *correct_answer) {
-    do {
-        *num1 = generate_random(0, 9);
-        *num2 = generate_random(0, 9);
-        *operator = generate_operator();
-        *correct_answer = calculate_answer(*num1, *num2, *operator, display_buffer);
-        display_buffer[0] = *num1;
-        // if(operator == '+') display_buffer[1] = 10;
-        // if(operator == '-') display_buffer[1] = 11;
-        // if(operator == '*') display_buffer[1] = 12;
-        // display_buffer[1] =  12;
-        display_buffer[2] = *num2;
-        display_buffer[3]  = 0;
-    } while (*correct_answer > 9 && *correct_answer < 0); // Ensure single-digit and positive answers
+// // Helper function to generate a new question
+// static void generate_new_question(int *num1, int *num2, char *operator, int *correct_answer) {
+//      // Ensure single-digit and positive answers 
+//     do {   
+//         *num1 = generate_random(0, 9);
+//         *num2 = generate_random(0, 9);
+//         *operator = generate_operator();
+//         *correct_answer = calculate_answer(*num1, *num2, *operator, display_buffer);
+//         display_buffer[0] = *num1;
+//         display_buffer[2] = *num2;
+//         display_buffer[3]  = 0;
+
+//     } while (*correct_answer > 9 || *correct_answer < 0);
     
-}
+// }
 
-// Calculate answer based on operator
-static int calculate_answer(int num1, int num2, char operator, int *code_operator) {
-    switch(operator) {
-        case '+':
-            code_operator[1] = 10;
-            return num1 + num2;
-            break;
-        case '-':
-            code_operator[1] = 11;
-            return num1 - num2;
-            break;
-        case '*':
-            code_operator[1] = 12;
-            return num1 * num2;
-            break;
-        default:
-            return 0;
-            break;
-    }
-}
+// // Calculate answer based on operator
+// static int calculate_answer(int num1, int num2, char operator, int *code_operator) {
+//     switch(operator) {
+//         case '+':
+//             code_operator[1] = 10;
+//             return num1 + num2;
+//             break;
+//         case '-':
+//             code_operator[1] = 11;
+//             return num1 - num2;
+//             break;
+//         case '*':
+//             code_operator[1] = 12;
+//             return num1 * num2;
+//             break;
+//         default:
+//             return 0;
+//             break;
+//     }
+// }
 
-// Generate random operator
-static char generate_operator(void) {
-    char operators[] = {'+', '-', '*'};
-    return operators[generate_random(0, 2)];
-}
+// // Generate random operator
+// static char generate_operator(void) {
+//     char operators[] = {'+', '-', '*'};
+//     return operators[generate_random(0, 2)];
+// }
+
+// int get_led_index(int row, int col){
+//     return led_index[row][col];
+// }
+
+// esp_err_t init_led_strip(void) {
+//     // Configure RMT TX channel
+
+//     rmt_tx_channel_config_t tx_chan_config = {
+//         .clk_src = RMT_CLK_SRC_DEFAULT,
+//         .gpio_num = RMT_LED_STRIP_GPIO_NUM,
+//         .mem_block_symbols = 64,
+//         .resolution_hz = RMT_LED_STRIP_RESOLUTION_HZ,
+//         .trans_queue_depth = 4,
+//     };
+//     ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_chan_config, &led_chan));
+
+//     // Configure LED strip encoder
+//     led_strip_encoder_config_t encoder_config = {
+//         .resolution = RMT_LED_STRIP_RESOLUTION_HZ,
+//     };
+//     ESP_ERROR_CHECK(rmt_new_led_strip_encoder(&encoder_config, &led_encoder));
+
+//     // Enable RMT TX channel
+//     ESP_ERROR_CHECK(rmt_enable(led_chan));
+
+//     return ESP_OK;
+// }
+
+// esp_err_t set_led(uint32_t index, uint8_t red, uint8_t green, uint8_t blue) {
+//     if (index >= MAX_LEDS) {
+//         return ESP_ERR_INVALID_ARG;
+//     }
+
+//     // Clear buffer first
+//     memset(led_strip_pixels, 0, sizeof(led_strip_pixels));
+
+//     // Set RGB values for specified LED
+//     led_strip_pixels[index * 3 + 0] = green;  // GRB format
+//     led_strip_pixels[index * 3 + 1] = blue;
+//     led_strip_pixels[index * 3 + 2] = red;
+
+//     // Transmit configuration
+//     rmt_transmit_config_t tx_config = {
+//         .loop_count = 0,
+//     };
+
+//     // Send data to LED strip
+//     ESP_ERROR_CHECK(rmt_transmit(led_chan, led_encoder, led_strip_pixels, sizeof(led_strip_pixels), &tx_config));
+//     ESP_ERROR_CHECK(rmt_tx_wait_all_done(led_chan, portMAX_DELAY));
+
+//     return ESP_OK;
+// }
+
+// // void led_task(){
+// //     init_led_strip();
+
+// //     ESP_LOGI(TAG, "Start blinking LED strip");
+// //     while (1) {
+// //     if(Current_LED_INDEX > 0){
+// //     // ws2812_set_led(Current_LED_INDEX, 100, 0, 0);  // Set first LED
+// //     ESP_LOGI("LED", "LED-%d ON", Current_LED_INDEX);
+// //     }
+// //     vTaskDelay(pdMS_TO_TICKS(500));
+// //     }
+// // }
 
 
-int get_led_index(int row, int col){
-    return led_index[row][col];
-}
+// char kbd_handler(matrix_kbd_handle_t mkbd_handle, matrix_kbd_event_id_t event, void *event_data, void *handler_args)
+// {   
 
-
-
-void led_task(){
-    esp_err_t err = ws2812_init();
-    if(err) ESP_LOGE("errr", "err");
-
-
-    ESP_LOGI(TAG, "Start blinking LED strip");
-    // while (1) {
-    // if(Current_LED_INDEX > 0){
-    // ws2812_set_led(Current_LED_INDEX, 50, 50, 50);  // Set first LED
-    // ESP_LOGI("LED", "LED-%d ON", Current_LED_INDEX);
-    // }
-    // vTaskDelay(pdMS_TO_TICKS(500));
-    // }
-}
-
-
-
-
-char kbd_handler(matrix_kbd_handle_t mkbd_handle, matrix_kbd_event_id_t event, void *event_data, void *handler_args)
-{   
-
-    uint32_t key_code = (uint32_t)event_data;
-    int col = key_code >> 8;    // Get first 2 digits (01)
-    int row = key_code & 0xFF;  // Get last 2 digits (04)
+//     uint32_t key_code = (uint32_t)event_data;
+//     int col = key_code >> 8;    // Get first 2 digits (01)
+//     int row = key_code & 0xFF;  // Get last 2 digits (04)
 
     
-    switch (event) {
-    case MATRIX_KBD_EVENT_DOWN:
-        Current_LED_INDEX = get_led_index(row, col);
-        ESP_LOGI(TAG, " press : %c %d %d, LED-%d",character[row][col], col, row, Current_LED_INDEX);
-        ws2812_set_led(Current_LED_INDEX, 50, 50, 50);  // Set first LED
-        xQueueSend(keyboard_queue, &character[row][col], portMAX_DELAY);
-        break;
-    case MATRIX_KBD_EVENT_UP:
-        ws2812_set_led(Current_LED_INDEX, 0, 0, 0);  // Set first LED
-        Current_LED_INDEX = 0;
-        // ESP_LOGI("IDK", "%s", xTaskGetCurrentTaskHandle());
-        // ESP_LOGI(TAG, "release event,key %c, key code = %04"PRIx32,character[row][col], key_code);
-        break;
-    }
+//     switch (event) {
+//     case MATRIX_KBD_EVENT_DOWN:
+//         // Current_LED_INDEX = get_led_index(row, col);
+//         ESP_LOGI(TAG, " press : %c %d %d, LED-%d",character[row][col], col, row, 0);
+//         // set_led(Current_LED_INDEX, 50, 0, 0);  // Set the LED on after pressed
+//         // xQueueSend(keyboard_queue, &character[row][col], portMAX_DELAY);
+//         break;
+//     case MATRIX_KBD_EVENT_UP:
+//             ESP_LOGI(TAG, " release : %c %d %d, LED-%d",character[row][col], col, row, 0);
 
-    return character[row][col];
-}
+//         // set_led(Current_LED_INDEX, 0, 0, 0);
+//         // Current_LED_INDEX = 0;
 
-static void keyboard_init(){
-    matrix_kbd_handle_t kbd = NULL;
-    matrix_kbd_config_t config = MATRIX_KEYBOARD_DEFAULT_CONFIG();
+
+//         // ESP_LOGI("IDK", "%s", xTaskGetCurrentTaskHandle());
+//         // ESP_LOGI(TAG, "release event,key %c, key code = %04"PRIx32,character[row][col], key_code);
+//         break;
+//     }
+
+//     return character[row][col];
+// }
+
+
+
+// char kbd_handler(matrix_kbd_handle_t mkbd_handle, matrix_kbd_event_id_t event, void *event_data, void *handler_args)
+// {   
+
+//     uint32_t key_code = (uint32_t)event_data;
+//     int col = key_code >> 8;    // Get first 2 digits (01)
+//     int row = key_code & 0xFF;  // Get last 2 digits (04)
+
+    
+//     switch (event) {
+//     case MATRIX_KBD_EVENT_DOWN:
+//         Current_LED_INDEX = get_led_index(row, col);
+//         ESP_LOGI(TAG, " press : %c %d %d, LED-%d",character[row][col], col, row, Current_LED_INDEX);
+//         set_led(Current_LED_INDEX, 50, 0, 0);  // Set the LED on after pressed
+//         // xQueueSend(keyboard_queue, &character[row][col], portMAX_DELAY);
+//         break;
+//     case MATRIX_KBD_EVENT_UP:
+//         set_led(Current_LED_INDEX, 0, 0, 0);
+//         Current_LED_INDEX = 0;
+
+
+//         // ESP_LOGI("IDK", "%s", xTaskGetCurrentTaskHandle());
+//         // ESP_LOGI(TAG, "release event,key %c, key code = %04"PRIx32,character[row][col], key_code);
+//         break;
+//     }
+
+//     return character[row][col];
+// }
+
+// static void keyboard_init(){
+//     matrix_kbd_handle_t kbd = NULL;
+//     matrix_kbd_config_t config = MATRIX_KEYBOARD_DEFAULT_CONFIG();
  
-    config.row_gpios = ROW_GPIO;
-    config.nr_col_gpios = 4;
-    config.col_gpios = COL_GPIO;
-    config.nr_row_gpios = 4;
-    matrix_kbd_install(&config, &kbd);
-    matrix_kbd_register_event_handler(kbd, kbd_handler, NULL);
-    matrix_kbd_start(kbd);
-}
+//     config.row_gpios = ROW_GPIO;
+//     config.nr_row_gpios = 3;
+//     config.col_gpios = COL_GPIO;
+//     config.nr_col_gpios = 3;
+//     matrix_kbd_install(&config, &kbd);
+//     matrix_kbd_register_event_handler(kbd, kbd_handler, NULL);
+//     matrix_kbd_start(kbd);
+// }
 
 // play_sound(0)
 
+void init_spiffs(){
+    esp_vfs_spiffs_conf_t conf = {
+    .base_path = "/spiffs",
+    .partition_label = NULL,
+    .max_files = 5,
+    .format_if_mount_failed = false
+    };
+    esp_vfs_spiffs_register(&conf);
+
+
+    size_t total = 0, used = 0;
+    esp_err_t ret = esp_spiffs_info(NULL, &total, &used);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get SPIFFS partition information (%s)", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Partition size: total: %d, used: %d", total, used);
+    }
+
+}
 
 void app_main(void)
 {   
+    init_spiffs();
+    // FILE* f = fopen("/spiffs/hello.txt", "r");   
+    xTaskCreate(gpio_task, "matrix task", 2048, NULL, 5, NULL);
+    // init_led_strip();
     // ESP_ERROR_CHECK(init_spiffs());
     // ESP_ERROR_CHECK(init_i2s());
-    keyboard_init();
-    led_task();
-    xTaskCreate(task, "task", configMINIMAL_STACK_SIZE * 3, NULL, 5, NULL);
+    // keyboard_init();
+    // led_task();
+    // xTaskCreate(display_task, "display_task", configMINIMAL_STACK_SIZE * 3, NULL, 5, NULL);
 
-    xTaskCreate(math_game_task, "game_task", 2048, NULL, 5, NULL);
+    // xTaskCreate(math_game_task, "game_task", 2048, NULL, 5, NULL);
 }

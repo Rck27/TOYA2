@@ -16,27 +16,27 @@
 
 // Initialize RMT peripheral for WS2812
 esp_err_t ws2812_init(void) {
-    rmt_config_t config = {
-        .rmt_mode = RMT_MODE_TX,
-        .channel = RMT_TX_CHANNEL,
-        .gpio_num = LED_PIN,
-        .clk_div = 2, // 40MHz => 25ns resolution
-        .mem_block_num = 1,
-        .tx_config = {
-            .carrier_freq_hz = 0,
-            .carrier_level = RMT_CARRIER_LEVEL_LOW,
-            .idle_level = RMT_IDLE_LEVEL_LOW,
-            .carrier_duty_percent = 50,
-            .carrier_en = false,
-            .loop_en = false,
-            .idle_output_en = true,
-        }
+    ESP_LOGI(TAG, "Create RMT TX channel");
+    rmt_channel_handle_t led_chan = NULL;
+    rmt_tx_channel_config_t tx_chan_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT, // select source clock
+        .gpio_num = RMT_LED_STRIP_GPIO_NUM,
+        .mem_block_symbols = 64, // increase the block size can make the LED less flickering
+        .resolution_hz = RMT_LED_STRIP_RESOLUTION_HZ,
+        .trans_queue_depth = 4, // set the number of transactions that can be pending in the background
     };
+    ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_chan_config, &led_chan));
 
-    esp_err_t ret = rmt_config(&config);
-    if (ret != ESP_OK) return ret;
+    ESP_LOGI(TAG, "Install led strip encoder");
+    rmt_encoder_handle_t led_encoder = NULL;
+    led_strip_encoder_config_t encoder_config = {
+        .resolution = RMT_LED_STRIP_RESOLUTION_HZ,
+    };
+    ESP_ERROR_CHECK(rmt_new_led_strip_encoder(&encoder_config, &led_encoder));
 
-    return rmt_driver_install(config.channel, 0, 0);
+    ESP_LOGI(TAG, "Enable RMT TX channel");
+    ESP_ERROR_CHECK(rmt_enable(led_chan));
+    
 }
 
 // Convert a single byte to RMT pulses (8 bits)
