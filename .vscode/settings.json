@@ -14,7 +14,9 @@
         "matrix_keyboard.h": "c",
         "random": "c",
         "task.h": "c",
-        "gpio.h": "c"
+        "gpio.h": "c",
+        "i2s.h": "c",
+        "i2s_std.h": "c"
     },
     "idf.flashType": "UART"
 }

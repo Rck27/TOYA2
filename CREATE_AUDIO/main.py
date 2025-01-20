@@ -1,48 +1,33 @@
-import numpy as np
-from scipy.io import wavfile
 from pydub import AudioSegment
-from pydub.silence import split_on_silence
-import os
+import sys
 
-def split_audio_file(input_file, min_silence_len=500, silence_thresh=-40):
-    """
-    Split an audio file into segments based on silence detection.
-    
-    Parameters:
-    input_file (str): Path to the input audio file
-    output_dir (str): Directory to save the split audio files
-    min_silence_len (int): Minimum length of silence (in ms) to be considered as a split point
-    silence_thresh (int): Sound level (in dB) to be considered as silence
-    """
-    output_dir="CREATE_AUDIO\split_audio"
-    # Create output directory if it doesn't exist
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    # Load audio file
-    audio = AudioSegment.from_file(input_file)
-    
-    # Split audio based on silence
-    audio_chunks = split_on_silence(
-        audio,
-        min_silence_len=min_silence_len,
-        silence_thresh=silence_thresh,
-        keep_silence=100  # Keep 100ms of silence at the beginning and end
-    )
-    
-    # Export each chunk
-    for i, chunk in enumerate(audio_chunks):
-        # Export chunk
-        output_file = os.path.join(output_dir, f"{i+1}.wav")
-        chunk.export(output_file, format="wav")
+def convert_to_pcm(input_file, output_pcm):
+    try:
+        # Load audio file (supports MP3, WAV, and other formats)
+        audio = AudioSegment.from_file(input_file)
         
-        # Print information about the chunk
-        print(f"Saved segment {i+1}, duration: {len(chunk)/1000:.2f} seconds")
+        # Convert to mono (left channel only)
+        audio = audio.set_channels(1)
+        
+        # Set frame rate to 8kHz
+        audio = audio.set_frame_rate(8000)
+        
+        # Convert to 8-bit
+        audio = audio.set_sample_width(1)
+        
+        # Export as raw PCM
+        audio.export(output_pcm, format='raw')
+        
+        print(f"Successfully converted {input_file} to {output_pcm}")
+        print("Converted to: 8kHz, 8bit, mono (left channel)")
+            
+    except Exception as e:
+        print(f"Error converting file: {str(e)}")
 
-# Example usage
 if __name__ == "__main__":
-    split_audio_file(
-        "CREATE_AUDIO\audio-tes.mp3",
-        min_silence_len=100,    # Adjust this value based on your audio
-        silence_thresh=-30      # Adjust this value based on your audio
-    )
+    if len(sys.argv) != 3:
+        print("Usage: python script.py input_audio output.pcm")
+        print("Supported input formats: MP3, WAV, OGG, FLAC, etc.")
+        sys.exit(1)
+        
+    convert_to_pcm(sys.argv[1], sys.argv[2])

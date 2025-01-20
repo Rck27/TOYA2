@@ -10,6 +10,7 @@
 #include "driver/i2s.h"
 #include "esp_mac.h"
 #include "esp_spiffs.h"
+#include "esp_timer.h"
 
 #include "driver/rmt_tx.h"
 #include "led_strip_encoder.h"
@@ -20,17 +21,29 @@
 #include "string.h"
 #include "main.h"
 // #include "led.c"
+#define NUM_ROWS 3
+#define NUM_COLS 5
+// static i2s_chan_handle_t tx_chan;        // I2S tx channel handler
 
-#define NUM_ROWS 5
-#define NUM_COLS 3
 
-const gpio_num_t row_pins[NUM_ROWS] = {GPIO_NUM_36, GPIO_NUM_39, GPIO_NUM_34, GPIO_NUM_35, GPIO_NUM_21};
-const gpio_num_t col_pins[NUM_COLS] = {GPIO_NUM_32, GPIO_NUM_33, GPIO_NUM_25};
+#define DEBOUNCE_TIME_MS 50  // Debounce time in milliseconds
+
+// Matrix state tracking
+static bool key_states[NUM_ROWS][NUM_COLS] = {false};
+static uint32_t last_press_time[NUM_ROWS][NUM_COLS] = {0};
+
+
+// Updated to use valid GPIO pins that support both input/output
+// const gpio_num_t row_pins[NUM_ROWS] = {GPIO_NUM_21, GPIO_NUM_19, GPIO_NUM_18, GPIO_NUM_5, GPIO_NUM_17};
+// const gpio_num_t col_pins[NUM_COLS] = {GPIO_NUM_32, GPIO_NUM_33, GPIO_NUM_25};
+
+const gpio_num_t col_pins[NUM_COLS] = {18, 21,15,4, 14};
+const gpio_num_t row_pins[NUM_ROWS]= {19, 17, 16};
 
 void configure_pins(const gpio_num_t *pins, size_t num_pins, gpio_mode_t mode, gpio_pullup_t pull_up, gpio_pulldown_t pull_down, gpio_int_type_t intr_type) {
     for (size_t i = 0; i < num_pins; i++) {
         gpio_config_t config = {
-            .pin_bit_mask = (1ULL << pins[i]), // Create a bitmask for the pin
+            .pin_bit_mask = (1ULL << pins[i]),
             .mode = mode,
             .pull_up_en = pull_up,
             .pull_down_en = pull_down,
@@ -41,32 +54,181 @@ void configure_pins(const gpio_num_t *pins, size_t num_pins, gpio_mode_t mode, g
 }
 
 void gpio_init(){
+    // Columns as outputs
     configure_pins(col_pins, NUM_COLS, GPIO_MODE_OUTPUT, GPIO_PULLUP_DISABLE, GPIO_PULLDOWN_ENABLE, GPIO_INTR_DISABLE);
-    configure_pins(row_pins, NUM_ROWS, GPIO_MODE_INPUT, GPIO_PULLUP_DISABLE, GPIO_PULLDOWN_ENABLE, GPIO_INTR_NEGEDGE);
-}
-
-void gpio_task(){
-    static int rowsCnt, colsCnt = 0;
-    gpio_init();
-    // gpio_set_level(col_pins[1], 1);
-
-    while(1){
-        // ESP_LOGI("gpio", "get something %d", gpio_get_level(row_pins[1]));
-        while(colsCnt < NUM_COLS){
-        gpio_set_level(col_pins[0], 1);
-        while(rowsCnt < NUM_ROWS){
-            // ESP_LOGI("gpio", "r%d c%d", rowsCnt, colsCnt);
-            ESP_LOGI("gpio", "r%d c%d %d", rowsCnt, colsCnt, gpio_get_level(row_pins[rowsCnt]));
-            rowsCnt++;
-            vTaskDelay(10 / portTICK_PERIOD_MS);
-        }
-        // gpio_set_level(col_pins[0], 0);
-        colsCnt = colsCnt > NUM_COLS ? 0 : colsCnt+1;
-        }
-        
+    // Rows as inputs with pull-down
+    configure_pins(row_pins, NUM_ROWS, GPIO_MODE_INPUT, GPIO_PULLUP_DISABLE, GPIO_PULLDOWN_ENABLE, GPIO_INTR_DISABLE);
+    
+    // Initialize all columns to low
+    for (int i = 0; i < NUM_COLS; i++) {
+        gpio_set_level(col_pins[i], 0);
     }
 }
 
+void play_sound(char sound_number) {
+    // Create the full path: /spiffs/[number].pcm
+    char full_path[64];  // Adjust size as needed
+    snprintf(full_path, sizeof(full_path), "/spiffs/%c.pcm", sound_number);
+
+    FILE* f = fopen(full_path, "rb");
+    if (f == NULL) {
+        printf("Failed to open file: %s\n", full_path);
+        return;
+    }
+
+    // Get file size
+    fseek(f, 0, SEEK_END);
+    size_t file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    ESP_LOGI("I2S", "File size: %zu bytes", file_size);
+
+    // Prepare playback buffer
+    int16_t buffer[DMA_BUF_LEN];  // DMA_BUF_LEN should match your I2S configuration
+    size_t bytes_read = 0;
+    size_t bytes_written = 0;
+    size_t bytes_remaining = file_size;
+
+    // Start I2S playback
+    i2s_start(I2S_NUM);
+
+    // Playback loop
+    while (bytes_remaining > 0) {
+        // Read a chunk from the file
+        size_t chunk_size = (bytes_remaining < sizeof(buffer)) ? 
+                            bytes_remaining : sizeof(buffer);
+        bytes_read = fread(buffer, 1, chunk_size, f);
+
+        if (bytes_read == 0) {
+            ESP_LOGE("I2S", "Error or end of file reached.");
+            break;
+        }
+
+        // Optional: Adjust volume or process data
+        for (size_t i = 0; i < bytes_read / sizeof(int16_t); i++) {
+            buffer[i] = buffer[i] << 1;  // Simple volume scaling (adjust as needed)
+        }
+
+        // Write to I2S
+        i2s_write(I2S_NUM, buffer, bytes_read, &bytes_written, portMAX_DELAY);
+
+        // Update bytes remaining
+        bytes_remaining -= bytes_read;
+    }
+
+    // Send silence to flush buffers
+    memset(buffer, 0, sizeof(buffer));
+    // for (int i = 0; i < 3; i++) {
+    //     i2s_write(I2S_NUM, buffer, sizeof(buffer), &bytes_written, portMAX_DELAY);
+    // }
+
+    // Stop I2S playback
+    i2s_stop(I2S_NUM);
+
+    // Cleanup
+    fclose(f);
+    ESP_LOGI("I2S", "Playback finished for file: %s", full_path);
+}
+
+
+
+// void play_sound(char sound_number) {
+//     // Create the full path: /spiffs/[number].pcm
+//     char full_path[64];  // Adjust size as needed
+//     snprintf(full_path, sizeof(full_path), "/spiffs/%c.pcm", sound_number);
+
+//     FILE* f = fopen(full_path, "rb");
+//     if (f == NULL) {
+//         printf("Failed to open file: %s\n", full_path);
+//         return;
+//     }
+
+//     // Get file size
+//     fseek(f, 0, SEEK_END);
+//     size_t file_size = ftell(f);
+//     fseek(f, 0, SEEK_SET);
+
+//     ESP_LOGI("I2S", "size is %zu", file_size);
+
+//     // Prepare buffer and playback variables
+//     int16_t buffer[DMA_BUF_LEN];  // DMA_BUF_LEN should match your I2S configuration
+//     size_t bytes_read = 0;
+//     size_t bytes_written = 0;
+//     size_t bytes_remaining = file_size;
+
+//     // Start playback loop
+//     // i2s_channel_enable(tx_chan);
+//     i2s_start(I2S_NUM);
+//     while (bytes_remaining > 0) {
+//         // Read chunk from the file
+//         size_t chunk_size = (bytes_remaining < sizeof(buffer)) ? 
+//                             bytes_remaining : sizeof(buffer);
+//         bytes_read = fread(buffer, 1, chunk_size, f);
+
+//         if (bytes_read == 0) {
+//             printf("Error or end of file reached.\n");
+//             break;
+//         }
+
+//         // Write to I2S
+//         // i2s_channel_write(tx_chan, buffer, bytes_read * 2, &bytes_written, portMAX_DELAY);
+//         i2s_write(I2S_NUM, buffer, bytes_read, &bytes_written, portMAX_DELAY);
+
+//         // Update bytes remaining
+//         bytes_remaining -= bytes_read;
+//     }
+//     i2s_stop(I2S_NUM);
+//     // i2s_channel_disable(tx_chan);
+
+//     // Cleanup
+//     fclose(f);
+//     printf("Playback finished for file: %s\n", full_path);
+// }
+
+
+
+void gpio_task(void *pvParameters) {
+    int level;
+    gpio_init();
+
+    while(1) {
+        for (int col = 0; col < NUM_COLS; col++) {
+            gpio_set_level(col_pins[col], 1);
+            vTaskDelay(1 / portTICK_PERIOD_MS);
+            
+            for (int row = 0; row < NUM_ROWS; row++) {
+                level = gpio_get_level(row_pins[row]);
+                uint32_t current_time = esp_timer_get_time() / 1000; // Convert to milliseconds
+                
+                // If key is pressed (level == 1)
+                if (level) {
+                    // If key wasn't pressed before or enough time has passed since last press
+                    if (!key_states[row][col] && 
+                        (current_time - last_press_time[row][col]) > DEBOUNCE_TIME_MS) {
+                        
+                        key_states[row][col] = true;
+                        last_press_time[row][col] = current_time;
+                        ESP_LOGI("gpio", "Key released: %c", character[row][col] );
+                        play_sound(character[row][col]);
+                        
+                        // Add your key press handling code here
+                    }
+                } else {
+                    // Key is released
+                    if (key_states[row][col]) {
+                        key_states[row][col] = false;
+                        // Optional: Handle key release event
+                        
+                    }
+                }
+            }
+            
+            gpio_set_level(col_pins[col], 0);
+            vTaskDelay(5 / portTICK_PERIOD_MS);
+        }
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+}
 
 
 
@@ -78,7 +240,7 @@ const static char *TAG = "TOYA2";
 #define RMT_LED_STRIP_RESOLUTION_HZ 10000000 // 10MHz resolution, 1 tick = 0.1us (led strip needs a high resolution)
 #define RMT_LED_STRIP_GPIO_NUM      14
 
-static uint8_t led_strip_pixels[9 * 3];
+// static uint8_t led_strip_pixels[9 * 3];
 
 
 int num1, num2, correct_answer;
@@ -90,6 +252,38 @@ int display_buffer[4] = {0};
 
 rmt_channel_handle_t led_chan = NULL;
 rmt_encoder_handle_t led_encoder = NULL;
+
+
+
+
+// void init_i2s(void) {
+//     i2s_chan_config_t tx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+//     ESP_ERROR_CHECK(i2s_new_channel(&tx_chan_cfg, &tx_chan, NULL));
+
+
+//     i2s_std_config_t tx_std_cfg = {
+//             .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
+//             .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
+//                                                         I2S_SLOT_MODE_MONO),
+
+//             .gpio_cfg = {
+//                     .mclk = I2S_GPIO_UNUSED,    // some codecs may require mclk signal, this example doesn't need it
+//                     .bclk = I2S_BCK_IO,
+//                     .ws   = I2S_WS_IO,
+//                     .dout = I2S_DO_IO,
+//                     .din  = GPIO_NUM_NC,
+//                     .invert_flags = {
+//                             .mclk_inv = false,
+//                             .bclk_inv = false,
+//                             .ws_inv   = false,
+//                     },
+//             },
+//     };
+//     ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_chan, &tx_std_cfg));
+
+//     ESP_ERROR_CHECK(i2s_channel_enable(tx_chan));
+// }
+
 
 
 // void display_task(void *pvParameter)
@@ -125,72 +319,33 @@ rmt_encoder_handle_t led_encoder = NULL;
 // }
 
 
-// esp_err_t init_i2s(void) {
-//     i2s_config_t i2s_config = {
-//         .mode = I2S_MODE_MASTER | I2S_MODE_TX,
-//         .sample_rate = SAMPLE_RATE,
-//         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-//         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
-//         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-//         .dma_buf_count = DMA_BUF_COUNT,
-//         .dma_buf_len = DMA_BUF_LEN,
-//         .use_apll = false,
-//         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1
-//     };
+esp_err_t init_i2s(void) {
+    i2s_config_t i2s_config = {
+        .mode = I2S_MODE_MASTER | I2S_MODE_TX,
+        .sample_rate = SAMPLE_RATE,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .dma_buf_count = DMA_BUF_COUNT,
+        .dma_buf_len = DMA_BUF_LEN,
+        .use_apll = false,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1
+    };
 
-//     i2s_pin_config_t pin_config = {
-//         .bck_io_num = I2S_BCK_IO,
-//         .ws_io_num = I2S_WS_IO,
-//         .data_out_num = I2S_DO_IO,
-//         .data_in_num = I2S_PIN_NO_CHANGE
-//     };
+    i2s_pin_config_t pin_config = {
+        .bck_io_num = I2S_BCK_IO,
+        .ws_io_num = I2S_WS_IO,
+        .data_out_num = I2S_DO_IO,
+        .data_in_num = I2S_PIN_NO_CHANGE
+    };
 
-//     esp_err_t ret = i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
-//     if (ret != ESP_OK) return ret;
-//     return i2s_set_pin(I2S_NUM, &pin_config);
-// }
+    esp_err_t ret = i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
+    if (ret != ESP_OK) return ret;
+    return i2s_set_pin(I2S_NUM, &pin_config);
+}
 
-// esp_err_t init_spiffs(void) {
-//     esp_vfs_spiffs_conf_t conf = {
-//         .base_path = "/spiffs",
-//         .partition_label = NULL,
-//         .max_files = 5,
-//         .format_if_mount_failed = true
-//     };
-//     return esp_vfs_spiffs_register(&conf);
-// }
 
-// void play_sound(uint8_t sound_number) {
-//     FILE* f = fopen(PCM_FILE_PATH, "rb");
-//     if (f == NULL) {
-//         printf("Failed to open file\n");
-//         return;
-//     }
 
-//     // Seek to the correct position in the file
-//     fseek(f, sound_number * SOUND_BLOCK_SIZE, SEEK_SET);
-
-//     // Read and play the sound
-//     int16_t buffer[DMA_BUF_LEN];
-//     size_t bytes_read;
-//     size_t bytes_written;
-//     size_t bytes_remaining = SOUND_BLOCK_SIZE;
-
-//     while (bytes_remaining > 0) {
-//         // Read chunk from file
-//         size_t chunk_size = (bytes_remaining < DMA_BUF_LEN * 2) ? 
-//                             bytes_remaining : DMA_BUF_LEN * 2;
-//         bytes_read = fread(buffer, 1, chunk_size, f);
-        
-//         if (bytes_read == 0) break;
-
-//         // Write to I2S
-//         i2s_write(I2S_NUM, buffer, bytes_read, &bytes_written, portMAX_DELAY);
-//         bytes_remaining -= bytes_read;
-//     }
-
-//     fclose(f);
-// }
 
 
 // int generate_random(int min, int max) {
@@ -444,12 +599,12 @@ void init_spiffs(){
 void app_main(void)
 {   
     init_spiffs();
-    // FILE* f = fopen("/spiffs/hello.txt", "r");   
-    xTaskCreate(gpio_task, "matrix task", 2048, NULL, 5, NULL);
+    init_i2s();
+    gpio_init();
+
+  
+    xTaskCreate(gpio_task, "matrix task", 4096, NULL, 5, NULL);
     // init_led_strip();
-    // ESP_ERROR_CHECK(init_spiffs());
-    // ESP_ERROR_CHECK(init_i2s());
-    // keyboard_init();
     // led_task();
     // xTaskCreate(display_task, "display_task", configMINIMAL_STACK_SIZE * 3, NULL, 5, NULL);
 
