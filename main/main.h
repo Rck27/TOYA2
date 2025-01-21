@@ -19,8 +19,8 @@ int ROW_GPIO[] = {7, 5, 3, }; // 1 2
 #define I2S_BCK_IO      GPIO_NUM_25
 #define I2S_WS_IO       GPIO_NUM_33
 #define I2S_DO_IO       GPIO_NUM_26
-#define SAMPLE_RATE     8000
-#define DMA_BUF_COUNT   8
+#define SAMPLE_RATE     16000
+#define DMA_BUF_COUNT   3
 #define DMA_BUF_LEN     1024
 
 // Audio file configuration
@@ -61,7 +61,8 @@ int led_index[3][5] = {
 };
 int get_led_index(int , int);
 void play_sound(char sound_number);
-// static void generate_new_question(int *num1, int *num2, char *operator, int *correct_answer);
 
-// static int calculate_answer(int num1, int num2, char operator, int *display_buffer);
-// static char generate_operator(void);
+
+static void generate_new_question(int *num1, int *num2, char *operator, int *correct_answer);
+static int calculate_answer(int num1, int num2, char operator, int *display_buffer);
+static char generate_operator(void);

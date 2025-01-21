@@ -33,6 +33,10 @@ static bool key_states[NUM_ROWS][NUM_COLS] = {false};
 static uint32_t last_press_time[NUM_ROWS][NUM_COLS] = {0};
 
 
+QueueHandle_t keyboard_queue;
+
+
+
 // Updated to use valid GPIO pins that support both input/output
 // const gpio_num_t row_pins[NUM_ROWS] = {GPIO_NUM_21, GPIO_NUM_19, GPIO_NUM_18, GPIO_NUM_5, GPIO_NUM_17};
 // const gpio_num_t col_pins[NUM_COLS] = {GPIO_NUM_32, GPIO_NUM_33, GPIO_NUM_25};
@@ -84,7 +88,7 @@ void play_sound(char sound_number) {
     ESP_LOGI("I2S", "File size: %zu bytes", file_size);
 
     // Prepare playback buffer
-    int16_t buffer[DMA_BUF_LEN];  // DMA_BUF_LEN should match your I2S configuration
+    int16_t buffer[DMA_BUF_LEN];  
     size_t bytes_read = 0;
     size_t bytes_written = 0;
     size_t bytes_remaining = file_size;
@@ -209,6 +213,7 @@ void gpio_task(void *pvParameters) {
                         key_states[row][col] = true;
                         last_press_time[row][col] = current_time;
                         ESP_LOGI("gpio", "Key released: %c", character[row][col] );
+                        xQueueSend(keyboard_queue, &character[row][col] , (TickType_t)0 );
                         play_sound(character[row][col]);
                         
                         // Add your key press handling code here
@@ -256,33 +261,6 @@ rmt_encoder_handle_t led_encoder = NULL;
 
 
 
-// void init_i2s(void) {
-//     i2s_chan_config_t tx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-//     ESP_ERROR_CHECK(i2s_new_channel(&tx_chan_cfg, &tx_chan, NULL));
-
-
-//     i2s_std_config_t tx_std_cfg = {
-//             .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
-//             .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
-//                                                         I2S_SLOT_MODE_MONO),
-
-//             .gpio_cfg = {
-//                     .mclk = I2S_GPIO_UNUSED,    // some codecs may require mclk signal, this example doesn't need it
-//                     .bclk = I2S_BCK_IO,
-//                     .ws   = I2S_WS_IO,
-//                     .dout = I2S_DO_IO,
-//                     .din  = GPIO_NUM_NC,
-//                     .invert_flags = {
-//                             .mclk_inv = false,
-//                             .bclk_inv = false,
-//                             .ws_inv   = false,
-//                     },
-//             },
-//     };
-//     ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_chan, &tx_std_cfg));
-
-//     ESP_ERROR_CHECK(i2s_channel_enable(tx_chan));
-// }
 
 
 
@@ -348,91 +326,94 @@ esp_err_t init_i2s(void) {
 
 
 
-// int generate_random(int min, int max) {
-//     return min + esp_random() % (max - min + 1);
-// }
+int generate_random(int min, int max) {
+    return min + esp_random() % (max - min + 1);
+}
 
-// // Math game task
-// void math_game_task(void *pvParameters) {
+// Math game task
+void math_game_task(void *pvParameters) {
     
-//     keyboard_queue = xQueueCreate(10, sizeof(char));
+    keyboard_queue = xQueueCreate(10, sizeof(char));
 
-//     // Generate initial question
-//     generate_new_question(&num1, &num2, &operator, &correct_answer);
+    // Generate initial question
+    generate_new_question(&num1, &num2, &operator, &correct_answer);
     
 
-//     while(game_active) {
-//         // Display current question
-//         printf("\nSolve: %d %c %d = ?\n", num1, operator, num2);
+    while(game_active) {
+        // Display current question
+        printf("\nSolve: %d %c %d = ?\n", num1, operator, num2);
         
-//         bool question_active = true;
-//         while(question_active) {
-//             // Wait for character from keyboard queue
-//             if(xQueueReceive(keyboard_queue, &received_char, portMAX_DELAY) == pdTRUE) {
-//                 if(received_char == 'M') {
-//                     generate_new_question(&num1, &num2, &operator, &correct_answer);
-//                     printf("new question is generated");
-//                 }
-//                 int user_answer = received_char - '0'; // Convert ASCII to integer
+        bool question_active = true;
+        while(question_active) {
+            // Wait for character from keyboard queue
+            if(xQueueReceive(keyboard_queue, &received_char, portMAX_DELAY) == pdTRUE) {
+                if(received_char == 'M') {
+                    generate_new_question(&num1, &num2, &operator, &correct_answer);
+                    printf("new question is generated");
+                    play_sound('new');
+                }
+                int user_answer = received_char - '0'; // Convert ASCII to integer
                 
-//                 if(user_answer == correct_answer) {
-//                     printf("\nCorrect! Well done!\n");
-//                     // Generate new question only after correct answer
-//                     generate_new_question(&num1, &num2, &operator, &correct_answer);
-//                     question_active = false;
-//                 } else {
-//                     printf("\nIncorrect. Try again!\n");
-//                 }
+                if(user_answer == correct_answer) {
+                    printf("\nCorrect! Well done!\n");
+                    play_sound('correct');
+                    // Generate new question only after correct answer
+                    generate_new_question(&num1, &num2, &operator, &correct_answer);
+                    question_active = false;
+                } else {
+                    printf("\nIncorrect. Try again!\n");
+                    play_sound('false');
+                }
                 
-//                 // Small delay for readability
-//                 vTaskDelay(pdMS_TO_TICKS(1000));
-//             }
-//         }
-//     }
-// }
+                // Small delay for readability
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+        }
+    }
+}
 
-// // Helper function to generate a new question
-// static void generate_new_question(int *num1, int *num2, char *operator, int *correct_answer) {
-//      // Ensure single-digit and positive answers 
-//     do {   
-//         *num1 = generate_random(0, 9);
-//         *num2 = generate_random(0, 9);
-//         *operator = generate_operator();
-//         *correct_answer = calculate_answer(*num1, *num2, *operator, display_buffer);
-//         display_buffer[0] = *num1;
-//         display_buffer[2] = *num2;
-//         display_buffer[3]  = 0;
+// Helper function to generate a new question
+static void generate_new_question(int *num1, int *num2, char *operator, int *correct_answer) {
+     // Ensure single-digit and positive answers 
+    do {   
+        *num1 = generate_random(0, 9);
+        *num2 = generate_random(0, 9);
+        *operator = generate_operator();
+        *correct_answer = calculate_answer(*num1, *num2, *operator, display_buffer);
+        display_buffer[0] = *num1;
+        display_buffer[2] = *num2;
+        display_buffer[3]  = 0;
 
-//     } while (*correct_answer > 9 || *correct_answer < 0);
+    } while (*correct_answer > 9 || *correct_answer < 0);
     
-// }
+}
 
-// // Calculate answer based on operator
-// static int calculate_answer(int num1, int num2, char operator, int *code_operator) {
-//     switch(operator) {
-//         case '+':
-//             code_operator[1] = 10;
-//             return num1 + num2;
-//             break;
-//         case '-':
-//             code_operator[1] = 11;
-//             return num1 - num2;
-//             break;
-//         case '*':
-//             code_operator[1] = 12;
-//             return num1 * num2;
-//             break;
-//         default:
-//             return 0;
-//             break;
-//     }
-// }
+// Calculate answer based on operator
+static int calculate_answer(int num1, int num2, char operator, int *code_operator) {
+    switch(operator) {
+        case '+':
+            code_operator[1] = 10;
+            return num1 + num2;
+            break;
+        case '-':
+            code_operator[1] = 11;
+            return num1 - num2;
+            break;
+        case '*':
+            code_operator[1] = 12;
+            return num1 * num2;
+            break;
+        default:
+            return 0;
+            break;
+    }
+}
 
-// // Generate random operator
-// static char generate_operator(void) {
-//     char operators[] = {'+', '-', '*'};
-//     return operators[generate_random(0, 2)];
-// }
+// Generate random operator
+static char generate_operator(void) {
+    char operators[] = {'+', '-', '*'};
+    return operators[generate_random(0, 2)];
+}
 
 // int get_led_index(int row, int col){
 //     return led_index[row][col];
@@ -608,5 +589,5 @@ void app_main(void)
     // led_task();
     // xTaskCreate(display_task, "display_task", configMINIMAL_STACK_SIZE * 3, NULL, 5, NULL);
 
-    // xTaskCreate(math_game_task, "game_task", 2048, NULL, 5, NULL);
+    xTaskCreate(math_game_task, "game_task", 2048, NULL, 5, NULL);
 }
