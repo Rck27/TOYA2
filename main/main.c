@@ -21,8 +21,7 @@
 #include "string.h"
 #include "main.h"
 // #include "led.c"
-#define NUM_ROWS 3
-#define NUM_COLS 5
+
 // static i2s_chan_handle_t tx_chan;        // I2S tx channel handler
 
 
@@ -32,6 +31,7 @@
 static bool key_states[NUM_ROWS][NUM_COLS] = {false};
 static uint32_t last_press_time[NUM_ROWS][NUM_COLS] = {0};
 
+SemaphoreHandle_t audio_semaphore = NULL;
 
 QueueHandle_t keyboard_queue;
 
@@ -40,9 +40,6 @@ QueueHandle_t keyboard_queue;
 // Updated to use valid GPIO pins that support both input/output
 // const gpio_num_t row_pins[NUM_ROWS] = {GPIO_NUM_21, GPIO_NUM_19, GPIO_NUM_18, GPIO_NUM_5, GPIO_NUM_17};
 // const gpio_num_t col_pins[NUM_COLS] = {GPIO_NUM_32, GPIO_NUM_33, GPIO_NUM_25};
-
-const gpio_num_t col_pins[NUM_COLS] = {18, 21,15,4, 14};
-const gpio_num_t row_pins[NUM_ROWS]= {19, 17, 16};
 
 void configure_pins(const gpio_num_t *pins, size_t num_pins, gpio_mode_t mode, gpio_pullup_t pull_up, gpio_pulldown_t pull_down, gpio_int_type_t intr_type) {
     for (size_t i = 0; i < num_pins; i++) {
@@ -69,14 +66,24 @@ void gpio_init(){
     }
 }
 
+bool audioActive = 0;
 void play_sound(char sound_number) {
-    // Create the full path: /spiffs/[number].pcm
-    char full_path[64];  // Adjust size as needed
+    if (xSemaphoreTake(audio_semaphore, pdMS_TO_TICKS(10)) != pdTRUE) {
+        ESP_LOGI("audio", "Audio busy, skipping playback");
+        return;
+    }
+
+    audioActive = true;
+    
+    // Create the full path
+    char full_path[64];
     snprintf(full_path, sizeof(full_path), "/spiffs/%c.pcm", sound_number);
 
     FILE* f = fopen(full_path, "rb");
     if (f == NULL) {
-        printf("Failed to open file: %s\n", full_path);
+        ESP_LOGE("I2S", "Failed to open file: %s", full_path);
+        audioActive = false;
+        xSemaphoreGive(audio_semaphore);
         return;
     }
 
@@ -94,11 +101,17 @@ void play_sound(char sound_number) {
     size_t bytes_remaining = file_size;
 
     // Start I2S playback
-    i2s_start(I2S_NUM);
+    esp_err_t err = i2s_start(I2S_NUM);
+    if (err != ESP_OK) {
+        ESP_LOGE("I2S", "Failed to start I2S: %d", err);
+        fclose(f);
+        audioActive = false;
+        xSemaphoreGive(audio_semaphore);
+        return;
+    }
 
     // Playback loop
     while (bytes_remaining > 0) {
-        // Read a chunk from the file
         size_t chunk_size = (bytes_remaining < sizeof(buffer)) ? 
                             bytes_remaining : sizeof(buffer);
         bytes_read = fread(buffer, 1, chunk_size, f);
@@ -110,21 +123,17 @@ void play_sound(char sound_number) {
 
         // Optional: Adjust volume or process data
         for (size_t i = 0; i < bytes_read / sizeof(int16_t); i++) {
-            buffer[i] = buffer[i] << 1;  // Simple volume scaling (adjust as needed)
+            buffer[i] = buffer[i] << 1;
         }
 
-        // Write to I2S
-        i2s_write(I2S_NUM, buffer, bytes_read, &bytes_written, portMAX_DELAY);
+        err = i2s_write(I2S_NUM, buffer, bytes_read, &bytes_written, portMAX_DELAY);
+        if (err != ESP_OK) {
+            ESP_LOGE("I2S", "Error writing to I2S: %d", err);
+            break;
+        }
 
-        // Update bytes remaining
         bytes_remaining -= bytes_read;
     }
-
-    // Send silence to flush buffers
-    memset(buffer, 0, sizeof(buffer));
-    // for (int i = 0; i < 3; i++) {
-    //     i2s_write(I2S_NUM, buffer, sizeof(buffer), &bytes_written, portMAX_DELAY);
-    // }
 
     // Stop I2S playback
     i2s_stop(I2S_NUM);
@@ -132,7 +141,12 @@ void play_sound(char sound_number) {
     // Cleanup
     fclose(f);
     ESP_LOGI("I2S", "Playback finished for file: %s", full_path);
+    
+    audioActive = false;
+    xSemaphoreGive(audio_semaphore);
 }
+
+
 
 
 
@@ -198,7 +212,7 @@ void gpio_task(void *pvParameters) {
     while(1) {
         for (int col = 0; col < NUM_COLS; col++) {
             gpio_set_level(col_pins[col], 1);
-            vTaskDelay(1 / portTICK_PERIOD_MS);
+            vTaskDelay(10 / portTICK_PERIOD_MS);
             
             for (int row = 0; row < NUM_ROWS; row++) {
                 level = gpio_get_level(row_pins[row]);
@@ -213,7 +227,7 @@ void gpio_task(void *pvParameters) {
                         key_states[row][col] = true;
                         last_press_time[row][col] = current_time;
                         ESP_LOGI("gpio", "Key released: %c", character[row][col] );
-                        xQueueSend(keyboard_queue, &character[row][col] , (TickType_t)0 );
+                        xQueueSend(keyboard_queue, &character[row][col], (TickType_t)0);
                         play_sound(character[row][col]);
                         
                         // Add your key press handling code here
@@ -229,7 +243,7 @@ void gpio_task(void *pvParameters) {
             }
             
             gpio_set_level(col_pins[col], 0);
-            vTaskDelay(5 / portTICK_PERIOD_MS);
+            vTaskDelay(10 / portTICK_PERIOD_MS);
         }
         vTaskDelay(10 / portTICK_PERIOD_MS);
     }
@@ -252,49 +266,57 @@ int num1, num2, correct_answer;
 char operator;
 char received_char;
 bool game_active = true;
+bool textChanged = 1;
 int display_buffer[4] = {0};
 
 
 rmt_channel_handle_t led_chan = NULL;
 rmt_encoder_handle_t led_encoder = NULL;
 
+    // max7219_t display;
 
 
 
 
+void display_task()
+{
+    // Configure SPI bus
+    spi_bus_config_t cfg = {
+       .mosi_io_num = CONFIG_PIN_NUM_MOSI,
+       .miso_io_num = -1,
+       .sclk_io_num = CONFIG_PIN_NUM_CLK,
+       .quadwp_io_num = -1,
+       .quadhd_io_num = -1,
+       .max_transfer_sz = 0,
+       .flags = 0
+    };
+    ESP_ERROR_CHECK(spi_bus_initialize(HOST, &cfg, 1));
 
+    // Configure device
+    
+    max7219_t display = {
+       .cascade_size = CONFIG_CASCADE_SIZE,
+       .digits = 0,
+       .mirrored = true
+    };
+ 
+    ESP_ERROR_CHECK(max7219_init_desc(&display, HOST, MAX7219_MAX_CLOCK_SPEED_HZ, CONFIG_PIN_CS));
+    ESP_ERROR_CHECK(max7219_init(&display));
 
-// void display_task(void *pvParameter)
-// {
-//     // Configure SPI bus
-//     spi_bus_config_t cfg = {
-//        .mosi_io_num = CONFIG_EXAMPLE_PIN_NUM_MOSI,
-//        .miso_io_num = -1,
-//        .sclk_io_num = CONFIG_EXAMPLE_PIN_NUM_CLK,
-//        .quadwp_io_num = -1,
-//        .quadhd_io_num = -1,
-//        .max_transfer_sz = 0,
-//        .flags = 0
-//     };
-//     ESP_ERROR_CHECK(spi_bus_initialize(HOST, &cfg, 1));
-
-//     // Configure device
-//     max7219_t dev = {
-//        .cascade_size = CONFIG_EXAMPLE_CASCADE_SIZE,
-//        .digits = 0,
-//        .mirrored = true
-//     };
-//     ESP_ERROR_CHECK(max7219_init_desc(&dev, HOST, MAX7219_MAX_CLOCK_SPEED_HZ, CONFIG_EXAMPLE_PIN_CS));
-//     ESP_ERROR_CHECK(max7219_init(&dev));
-
-//     while (1)
-//     {   
-//         for(int i = 0; i < CONFIG_EXAMPLE_CASCADE_SIZE; i++){
-//             max7219_draw_image_8x8(&dev, i * 8, (uint8_t *)&symbols[display_buffer[i]]);
-//             vTaskDelay(pdMS_TO_TICKS(CONFIG_EXAMPLE_SCROLL_DELAY));
-//         }
-//     }
-// }
+    while (1)
+    {   
+        if(textChanged){
+        for(int i = 0; i < CONFIG_CASCADE_SIZE; i++){
+            max7219_draw_image_8x8(&display, i * 8, (uint8_t *)&symbols[display_buffer[i]]);
+            vTaskDelay(pdMS_TO_TICKS(CONFIG_SCROLL_DELAY));
+        }
+        textChanged = 0;
+        }
+        else {
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+    }
+}
 
 
 esp_err_t init_i2s(void) {
@@ -316,9 +338,14 @@ esp_err_t init_i2s(void) {
         .data_out_num = I2S_DO_IO,
         .data_in_num = I2S_PIN_NO_CHANGE
     };
+audio_semaphore = xSemaphoreCreateBinary();
+xSemaphoreGive(audio_semaphore); // Initialize as available
+
 
     esp_err_t ret = i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
     if (ret != ESP_OK) return ret;
+
+
     return i2s_set_pin(I2S_NUM, &pin_config);
 }
 
@@ -350,19 +377,19 @@ void math_game_task(void *pvParameters) {
                 if(received_char == 'M') {
                     generate_new_question(&num1, &num2, &operator, &correct_answer);
                     printf("new question is generated");
-                    play_sound('new');
+                    // play_sound('n');
                 }
                 int user_answer = received_char - '0'; // Convert ASCII to integer
                 
                 if(user_answer == correct_answer) {
                     printf("\nCorrect! Well done!\n");
-                    play_sound('correct');
+                    // play_sound('c');
                     // Generate new question only after correct answer
                     generate_new_question(&num1, &num2, &operator, &correct_answer);
                     question_active = false;
                 } else {
                     printf("\nIncorrect. Try again!\n");
-                    play_sound('false');
+                    // play_sound('f');
                 }
                 
                 // Small delay for readability
@@ -385,7 +412,8 @@ static void generate_new_question(int *num1, int *num2, char *operator, int *cor
         display_buffer[3]  = 0;
 
     } while (*correct_answer > 9 || *correct_answer < 0);
-    
+    textChanged = 1;
+
 }
 
 // Calculate answer based on operator
@@ -582,12 +610,12 @@ void app_main(void)
     init_spiffs();
     init_i2s();
     gpio_init();
-
+    // display_init();
   
-    xTaskCreate(gpio_task, "matrix task", 4096, NULL, 5, NULL);
+    xTaskCreate(gpio_task, "matrix task", 4096, NULL, 10, NULL);
     // init_led_strip();
     // led_task();
-    // xTaskCreate(display_task, "display_task", configMINIMAL_STACK_SIZE * 3, NULL, 5, NULL);
+    xTaskCreate(display_task, "display_task", 4096, NULL, 6, NULL);
 
-    xTaskCreate(math_game_task, "game_task", 2048, NULL, 5, NULL);
+    xTaskCreate(math_game_task, "game_task", 4096, NULL, 5, NULL);
 }

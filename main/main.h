@@ -1,18 +1,20 @@
 
 
-#define CONFIG_EXAMPLE_SCROLL_DELAY 200
-#define CONFIG_EXAMPLE_DELAY 500
-#define CONFIG_EXAMPLE_CASCADE_SIZE 4
+#define CONFIG_SCROLL_DELAY 200
+#define CONFIG_DELAY 500
+#define CONFIG_CASCADE_SIZE 4
 
-#define CONFIG_EXAMPLE_PIN_NUM_CLK GPIO_NUM_36
-#define CONFIG_EXAMPLE_PIN_NUM_MOSI GPIO_NUM_35
-#define CONFIG_EXAMPLE_PIN_CS GPIO_NUM_34
+#define CONFIG_PIN_NUM_CLK GPIO_NUM_32
+#define CONFIG_PIN_NUM_MOSI GPIO_NUM_27
+#define CONFIG_PIN_CS GPIO_NUM_12
 
 #define HOST SPI2_HOST
 
+#define NUM_ROWS 3
+#define NUM_COLS 5
 
-int COL_GPIO[] = {12, 11, 9};
-int ROW_GPIO[] = {7, 5, 3, }; // 1 2
+const gpio_num_t col_pins[NUM_COLS] = {18, 21,15,4, 14};
+const gpio_num_t row_pins[NUM_ROWS]= {19, 17, 16};
 
 
 #define I2S_NUM         I2S_NUM_0
@@ -61,7 +63,7 @@ int led_index[3][5] = {
 };
 int get_led_index(int , int);
 void play_sound(char sound_number);
-
+void init_display();
 
 static void generate_new_question(int *num1, int *num2, char *operator, int *correct_answer);
 static int calculate_answer(int num1, int num2, char operator, int *display_buffer);
