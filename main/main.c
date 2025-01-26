@@ -227,7 +227,10 @@ void gpio_task(void *pvParameters) {
                         key_states[row][col] = true;
                         last_press_time[row][col] = current_time;
                         ESP_LOGI("gpio", "Key released: %c", character[row][col] );
+                        
+                        
                         xQueueSend(keyboard_queue, &character[row][col], (TickType_t)0);
+                        // vTaskDelay(pdMS_TO_TICKS(50)); // 50 milliseconds delay
                         play_sound(character[row][col]);
                         
                         // Add your key press handling code here
@@ -365,40 +368,38 @@ void math_game_task(void *pvParameters) {
     // Generate initial question
     generate_new_question(&num1, &num2, &operator, &correct_answer);
     
-
-    while(game_active) {
-        // Display current question
-        printf("\nSolve: %d %c %d = ?\n", num1, operator, num2);
-        
-        bool question_active = true;
-        while(question_active) {
-            // Wait for character from keyboard queue
-            if(xQueueReceive(keyboard_queue, &received_char, portMAX_DELAY) == pdTRUE) {
-                if(received_char == 'M') {
-                    generate_new_question(&num1, &num2, &operator, &correct_answer);
-                    printf("new question is generated");
-                    // play_sound('n');
-                }
-                int user_answer = received_char - '0'; // Convert ASCII to integer
-                
-                if(user_answer == correct_answer) {
-                    printf("\nCorrect! Well done!\n");
-                    // play_sound('c');
-                    // Generate new question only after correct answer
-                    generate_new_question(&num1, &num2, &operator, &correct_answer);
-                    question_active = false;
-                } else {
-                    printf("\nIncorrect. Try again!\n");
-                    // play_sound('f');
-                }
-                
-                // Small delay for readability
-                vTaskDelay(pdMS_TO_TICKS(1000));
+while(game_active) {
+    // Display current question
+    printf("\nSolve: %d %c %d = %d ?\n", num1, operator, num2, correct_answer);
+    
+    while(1) {
+        // Wait for character from keyboard queue
+        if(xQueueReceive(keyboard_queue, &received_char, portMAX_DELAY) == pdTRUE) {
+            if(received_char == 'M') {
+                generate_new_question(&num1, &num2, &operator, &correct_answer);
+                printf("new question is generated");
+                play_sound('n');
+                continue;
             }
+            
+            int user_answer = received_char - '0'; // Convert ASCII to integer
+            
+            if(user_answer == correct_answer) {
+                printf("\nCorrect! Well done!\n");
+                play_sound('c');
+                generate_new_question(&num1, &num2, &operator, &correct_answer);
+                break; // Exit inner loop after correct answer
+            } else {
+                printf("\nIncorrect. Try again!\n");
+                play_sound('f');
+            }
+            
+            // Small delay to prevent tight looping
+            vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
 }
-
+}
 // Helper function to generate a new question
 static void generate_new_question(int *num1, int *num2, char *operator, int *correct_answer) {
      // Ensure single-digit and positive answers 
@@ -409,7 +410,7 @@ static void generate_new_question(int *num1, int *num2, char *operator, int *cor
         *correct_answer = calculate_answer(*num1, *num2, *operator, display_buffer);
         display_buffer[0] = *num1;
         display_buffer[2] = *num2;
-        display_buffer[3]  = 0;
+        display_buffer[3]  = *correct_answer;
 
     } while (*correct_answer > 9 || *correct_answer < 0);
     textChanged = 1;
@@ -442,146 +443,6 @@ static char generate_operator(void) {
     char operators[] = {'+', '-', '*'};
     return operators[generate_random(0, 2)];
 }
-
-// int get_led_index(int row, int col){
-//     return led_index[row][col];
-// }
-
-// esp_err_t init_led_strip(void) {
-//     // Configure RMT TX channel
-
-//     rmt_tx_channel_config_t tx_chan_config = {
-//         .clk_src = RMT_CLK_SRC_DEFAULT,
-//         .gpio_num = RMT_LED_STRIP_GPIO_NUM,
-//         .mem_block_symbols = 64,
-//         .resolution_hz = RMT_LED_STRIP_RESOLUTION_HZ,
-//         .trans_queue_depth = 4,
-//     };
-//     ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_chan_config, &led_chan));
-
-//     // Configure LED strip encoder
-//     led_strip_encoder_config_t encoder_config = {
-//         .resolution = RMT_LED_STRIP_RESOLUTION_HZ,
-//     };
-//     ESP_ERROR_CHECK(rmt_new_led_strip_encoder(&encoder_config, &led_encoder));
-
-//     // Enable RMT TX channel
-//     ESP_ERROR_CHECK(rmt_enable(led_chan));
-
-//     return ESP_OK;
-// }
-
-// esp_err_t set_led(uint32_t index, uint8_t red, uint8_t green, uint8_t blue) {
-//     if (index >= MAX_LEDS) {
-//         return ESP_ERR_INVALID_ARG;
-//     }
-
-//     // Clear buffer first
-//     memset(led_strip_pixels, 0, sizeof(led_strip_pixels));
-
-//     // Set RGB values for specified LED
-//     led_strip_pixels[index * 3 + 0] = green;  // GRB format
-//     led_strip_pixels[index * 3 + 1] = blue;
-//     led_strip_pixels[index * 3 + 2] = red;
-
-//     // Transmit configuration
-//     rmt_transmit_config_t tx_config = {
-//         .loop_count = 0,
-//     };
-
-//     // Send data to LED strip
-//     ESP_ERROR_CHECK(rmt_transmit(led_chan, led_encoder, led_strip_pixels, sizeof(led_strip_pixels), &tx_config));
-//     ESP_ERROR_CHECK(rmt_tx_wait_all_done(led_chan, portMAX_DELAY));
-
-//     return ESP_OK;
-// }
-
-// // void led_task(){
-// //     init_led_strip();
-
-// //     ESP_LOGI(TAG, "Start blinking LED strip");
-// //     while (1) {
-// //     if(Current_LED_INDEX > 0){
-// //     // ws2812_set_led(Current_LED_INDEX, 100, 0, 0);  // Set first LED
-// //     ESP_LOGI("LED", "LED-%d ON", Current_LED_INDEX);
-// //     }
-// //     vTaskDelay(pdMS_TO_TICKS(500));
-// //     }
-// // }
-
-
-// char kbd_handler(matrix_kbd_handle_t mkbd_handle, matrix_kbd_event_id_t event, void *event_data, void *handler_args)
-// {   
-
-//     uint32_t key_code = (uint32_t)event_data;
-//     int col = key_code >> 8;    // Get first 2 digits (01)
-//     int row = key_code & 0xFF;  // Get last 2 digits (04)
-
-    
-//     switch (event) {
-//     case MATRIX_KBD_EVENT_DOWN:
-//         // Current_LED_INDEX = get_led_index(row, col);
-//         ESP_LOGI(TAG, " press : %c %d %d, LED-%d",character[row][col], col, row, 0);
-//         // set_led(Current_LED_INDEX, 50, 0, 0);  // Set the LED on after pressed
-//         // xQueueSend(keyboard_queue, &character[row][col], portMAX_DELAY);
-//         break;
-//     case MATRIX_KBD_EVENT_UP:
-//             ESP_LOGI(TAG, " release : %c %d %d, LED-%d",character[row][col], col, row, 0);
-
-//         // set_led(Current_LED_INDEX, 0, 0, 0);
-//         // Current_LED_INDEX = 0;
-
-
-//         // ESP_LOGI("IDK", "%s", xTaskGetCurrentTaskHandle());
-//         // ESP_LOGI(TAG, "release event,key %c, key code = %04"PRIx32,character[row][col], key_code);
-//         break;
-//     }
-
-//     return character[row][col];
-// }
-
-
-
-// char kbd_handler(matrix_kbd_handle_t mkbd_handle, matrix_kbd_event_id_t event, void *event_data, void *handler_args)
-// {   
-
-//     uint32_t key_code = (uint32_t)event_data;
-//     int col = key_code >> 8;    // Get first 2 digits (01)
-//     int row = key_code & 0xFF;  // Get last 2 digits (04)
-
-    
-//     switch (event) {
-//     case MATRIX_KBD_EVENT_DOWN:
-//         Current_LED_INDEX = get_led_index(row, col);
-//         ESP_LOGI(TAG, " press : %c %d %d, LED-%d",character[row][col], col, row, Current_LED_INDEX);
-//         set_led(Current_LED_INDEX, 50, 0, 0);  // Set the LED on after pressed
-//         // xQueueSend(keyboard_queue, &character[row][col], portMAX_DELAY);
-//         break;
-//     case MATRIX_KBD_EVENT_UP:
-//         set_led(Current_LED_INDEX, 0, 0, 0);
-//         Current_LED_INDEX = 0;
-
-
-//         // ESP_LOGI("IDK", "%s", xTaskGetCurrentTaskHandle());
-//         // ESP_LOGI(TAG, "release event,key %c, key code = %04"PRIx32,character[row][col], key_code);
-//         break;
-//     }
-
-//     return character[row][col];
-// }
-
-// static void keyboard_init(){
-//     matrix_kbd_handle_t kbd = NULL;
-//     matrix_kbd_config_t config = MATRIX_KEYBOARD_DEFAULT_CONFIG();
- 
-//     config.row_gpios = ROW_GPIO;
-//     config.nr_row_gpios = 3;
-//     config.col_gpios = COL_GPIO;
-//     config.nr_col_gpios = 3;
-//     matrix_kbd_install(&config, &kbd);
-//     matrix_kbd_register_event_handler(kbd, kbd_handler, NULL);
-//     matrix_kbd_start(kbd);
-// }
 
 // play_sound(0)
 
@@ -617,5 +478,5 @@ void app_main(void)
     // led_task();
     xTaskCreate(display_task, "display_task", 4096, NULL, 6, NULL);
 
-    xTaskCreate(math_game_task, "game_task", 4096, NULL, 5, NULL);
+    xTaskCreate(math_game_task, "game_task", 4096 * 2, NULL, 5, NULL);
 }
