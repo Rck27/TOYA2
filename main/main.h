@@ -21,16 +21,22 @@ const gpio_num_t row_pins[NUM_ROWS]= {19, 17, 16};
 #define I2S_BCK_IO      GPIO_NUM_25
 #define I2S_WS_IO       GPIO_NUM_33
 #define I2S_DO_IO       GPIO_NUM_26
-#define SAMPLE_RATE     16000
+#define SAMPLE_RATE     8000
 #define DMA_BUF_COUNT   3
 #define DMA_BUF_LEN     1024
 
 // Audio file configuration
 #define SOUND_BLOCK_SIZE (24000 * 2)  // 1 second of audio at 44.1kHz, 16-bit
 
+
+#define BLANK_CHAR_INDEX 13
 int Current_LED_INDEX; // LED index only when the button is pressed (temporary)
 
-
+typedef enum {
+    MODE_FREE,
+    MODE_SOLVE_MATH,
+    MODE_FIND_NUMBER,
+} GameMode;
 
 const uint64_t symbols[] = {
     0x3c66666e76663c00, //0
@@ -45,7 +51,8 @@ const uint64_t symbols[] = {
     0x3c66607c66663c00, //9
     0x0808087c08080800, //+ 10
     0x0000007c00000000, // - 11
-    0x0042241818244200 //* 12
+    0x0042241818244200, //* 12
+    0x0000000000000000 //13
 };
 
 // Key matrix// 3x5 Character Matrix
@@ -65,6 +72,7 @@ int get_led_index(int , int);
 void play_sound(char sound_number);
 void init_display();
 
-static void generate_new_question(int *num1, int *num2, char *operator, int *correct_answer);
+void generate_new_question(int *num1, int *num2, char *operator, int *correct_answer, GameMode game_mode);
 static int calculate_answer(int num1, int num2, char operator, int *display_buffer);
 static char generate_operator(void);
+void play_sound_with_debounce(char sound_number);

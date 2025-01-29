@@ -33,7 +33,36 @@ static uint32_t last_press_time[NUM_ROWS][NUM_COLS] = {0};
 
 SemaphoreHandle_t audio_semaphore = NULL;
 
-QueueHandle_t keyboard_queue;
+QueueHandle_t keyboard_queue, audio_queue;
+
+GameMode game_mode = MODE_SOLVE_MATH; // Default mode
+
+
+#define MAX_LEDS 19
+
+const static char *TAG = "TOYA2";
+
+#define RMT_LED_STRIP_RESOLUTION_HZ 10000000 // 10MHz resolution, 1 tick = 0.1us (led strip needs a high resolution)
+#define RMT_LED_STRIP_GPIO_NUM      14
+
+// static uint8_t led_strip_pixels[9 * 3];
+
+
+int num1, num2, correct_answer;
+char operator;
+char received_char;
+bool game_active = true;
+bool textChanged = 1;
+int display_buffer[4] = {0};
+
+
+rmt_channel_handle_t led_chan = NULL;
+rmt_encoder_handle_t led_encoder = NULL;
+
+    // max7219_t display;
+
+#define SOUND_COOLDOWN_MS 50 // Adjust this based on your needs
+static uint32_t last_sound_time = 0;
 
 
 
@@ -123,7 +152,7 @@ void play_sound(char sound_number) {
 
         // Optional: Adjust volume or process data
         for (size_t i = 0; i < bytes_read / sizeof(int16_t); i++) {
-            buffer[i] = buffer[i] << 1;
+            buffer[i] = buffer[i] << 2;
         }
 
         err = i2s_write(I2S_NUM, buffer, bytes_read, &bytes_written, portMAX_DELAY);
@@ -147,65 +176,9 @@ void play_sound(char sound_number) {
 }
 
 
-
-
-
-// void play_sound(char sound_number) {
-//     // Create the full path: /spiffs/[number].pcm
-//     char full_path[64];  // Adjust size as needed
-//     snprintf(full_path, sizeof(full_path), "/spiffs/%c.pcm", sound_number);
-
-//     FILE* f = fopen(full_path, "rb");
-//     if (f == NULL) {
-//         printf("Failed to open file: %s\n", full_path);
-//         return;
-//     }
-
-//     // Get file size
-//     fseek(f, 0, SEEK_END);
-//     size_t file_size = ftell(f);
-//     fseek(f, 0, SEEK_SET);
-
-//     ESP_LOGI("I2S", "size is %zu", file_size);
-
-//     // Prepare buffer and playback variables
-//     int16_t buffer[DMA_BUF_LEN];  // DMA_BUF_LEN should match your I2S configuration
-//     size_t bytes_read = 0;
-//     size_t bytes_written = 0;
-//     size_t bytes_remaining = file_size;
-
-//     // Start playback loop
-//     // i2s_channel_enable(tx_chan);
-//     i2s_start(I2S_NUM);
-//     while (bytes_remaining > 0) {
-//         // Read chunk from the file
-//         size_t chunk_size = (bytes_remaining < sizeof(buffer)) ? 
-//                             bytes_remaining : sizeof(buffer);
-//         bytes_read = fread(buffer, 1, chunk_size, f);
-
-//         if (bytes_read == 0) {
-//             printf("Error or end of file reached.\n");
-//             break;
-//         }
-
-//         // Write to I2S
-//         // i2s_channel_write(tx_chan, buffer, bytes_read * 2, &bytes_written, portMAX_DELAY);
-//         i2s_write(I2S_NUM, buffer, bytes_read, &bytes_written, portMAX_DELAY);
-
-//         // Update bytes remaining
-//         bytes_remaining -= bytes_read;
-//     }
-//     i2s_stop(I2S_NUM);
-//     // i2s_channel_disable(tx_chan);
-
-//     // Cleanup
-//     fclose(f);
-//     printf("Playback finished for file: %s\n", full_path);
-// }
-
-
-
 void gpio_task(void *pvParameters) {
+    keyboard_queue = xQueueCreate(10, sizeof(char));
+
     int level;
     gpio_init();
 
@@ -230,10 +203,10 @@ void gpio_task(void *pvParameters) {
                         
                         
                         xQueueSend(keyboard_queue, &character[row][col], (TickType_t)0);
-                        // vTaskDelay(pdMS_TO_TICKS(50)); // 50 milliseconds delay
-                        play_sound(character[row][col]);
+                        vTaskDelay(pdMS_TO_TICKS(50)); // 50 milliseconds delay
+                        xQueueSend(audio_queue, &character[row][col], (TickType_t)0);
+
                         
-                        // Add your key press handling code here
                     }
                 } else {
                     // Key is released
@@ -255,30 +228,16 @@ void gpio_task(void *pvParameters) {
 
 
 
-#define MAX_LEDS 19
 
-const static char *TAG = "TOYA2";
-
-#define RMT_LED_STRIP_RESOLUTION_HZ 10000000 // 10MHz resolution, 1 tick = 0.1us (led strip needs a high resolution)
-#define RMT_LED_STRIP_GPIO_NUM      14
-
-// static uint8_t led_strip_pixels[9 * 3];
-
-
-int num1, num2, correct_answer;
-char operator;
-char received_char;
-bool game_active = true;
-bool textChanged = 1;
-int display_buffer[4] = {0};
-
-
-rmt_channel_handle_t led_chan = NULL;
-rmt_encoder_handle_t led_encoder = NULL;
-
-    // max7219_t display;
-
-
+void play_sound_with_debounce(char sound_number) {
+    uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    if ((current_time - last_sound_time) >= SOUND_COOLDOWN_MS) {
+        last_sound_time = current_time;
+        play_sound(sound_number);
+    } else {
+        ESP_LOGI("audio", "Skipped sound: %c, due to cooldown", sound_number);
+    }
+}
 
 
 void display_task()
@@ -360,62 +319,200 @@ int generate_random(int min, int max) {
     return min + esp_random() % (max - min + 1);
 }
 
-// Math game task
+
 void math_game_task(void *pvParameters) {
-    
-    keyboard_queue = xQueueCreate(10, sizeof(char));
+    audio_queue = xQueueCreate(10, sizeof(char));
+
+    // int num1, num2, correct_answer;
+    // char operator;
+    // char received_char;
 
     // Generate initial question
-    generate_new_question(&num1, &num2, &operator, &correct_answer);
-    
-while(game_active) {
-    // Display current question
-    printf("\nSolve: %d %c %d = %d ?\n", num1, operator, num2, correct_answer);
-    
-    while(1) {
-        // Wait for character from keyboard queue
-        if(xQueueReceive(keyboard_queue, &received_char, portMAX_DELAY) == pdTRUE) {
-            if(received_char == 'M') {
-                generate_new_question(&num1, &num2, &operator, &correct_answer);
-                printf("new question is generated");
-                play_sound('n');
-                continue;
+    generate_new_question(&num1, &num2, &operator, &correct_answer, game_mode);
+while (game_active) {
+        switch (game_mode) {
+            case MODE_SOLVE_MATH:
+                printf("\nSolve: %d %c %d = ?\n", num1, operator, num2);
+                break;
+            case MODE_FIND_NUMBER:
+                printf("\nFind the number: %d\n", correct_answer);
+                break;
+            case MODE_FREE:
+                printf("\nFree mode: Press any key to play sound and display character\n");
+                break;
+        }
+
+        while (1) {
+            // Wait for character from keyboard queue
+            if (xQueueReceive(keyboard_queue, &received_char, portMAX_DELAY) == pdTRUE) {
+                if (received_char == 'M') {
+                    // Switch to the next game mode
+                    game_mode = (game_mode + 1) % 3; // Cycle through modes (0: SOLVE_MATH, 1: FIND_NUMBER, 2: FREE)
+                    printf("Switched to mode: %d\n", game_mode);
+                    generate_new_question(&num1, &num2, &operator, &correct_answer, game_mode);
+                    xQueueSend(audio_queue, (char[]){ 'n' }, (TickType_t)0);
+                    break; // Exit inner loop to display new question
+                }
+
+                switch (game_mode) {
+                    case MODE_SOLVE_MATH: {
+                        int user_answer = received_char - '0'; // Convert ASCII to integer
+                        if (user_answer == correct_answer) {
+                            printf("\nCorrect! Well done!\n");
+                            xQueueSend(audio_queue, (char[]){ 'c' }, (TickType_t)0);
+                            generate_new_question(&num1, &num2, &operator, &correct_answer, game_mode);
+                            break; // Exit inner loop after correct answer
+                        } else {
+                            printf("\nIncorrect. Try again!\n");
+                            xQueueSend(audio_queue, (char[]){ 'f' }, (TickType_t)0);
+                        }
+                        break;
+                    }
+
+                    case MODE_FIND_NUMBER: {
+                        int user_answer = received_char - '0'; // Convert ASCII to integer
+                        if (user_answer == correct_answer) {
+                            printf("\nCorrect! You found the number!\n");
+                            xQueueSend(audio_queue, (char[]){ 'c' }, (TickType_t)0);
+                            generate_new_question(&num1, &num2, &operator, &correct_answer, game_mode);
+                            break; // Exit inner loop after correct answer
+                        } else {
+                            printf("\nIncorrect. Try again!\n");
+                            xQueueSend(audio_queue, (char[]){ 'f' }, (TickType_t)0);
+                        }
+                        break;
+                    }
+
+                    case MODE_FREE:
+                        // Play sound for the pressed button
+                        // xQueueSend(audio_queue, &received_char, (TickType_t)0);
+                        display_buffer[0] = (int) received_char - '0';
+                        // display_buffer[1] = BLANK_CHAR_INDEX,
+                        // displa
+                        textChanged = 1;
+                        // Display the pressed character
+                        printf("Pressed: %c\n", received_char);
+                        break;
+                }
+
+                // Small delay to prevent tight looping
+                vTaskDelay(pdMS_TO_TICKS(100));
             }
-            
-            int user_answer = received_char - '0'; // Convert ASCII to integer
-            
-            if(user_answer == correct_answer) {
-                printf("\nCorrect! Well done!\n");
-                play_sound('c');
-                generate_new_question(&num1, &num2, &operator, &correct_answer);
-                break; // Exit inner loop after correct answer
-            } else {
-                printf("\nIncorrect. Try again!\n");
-                play_sound('f');
-            }
-            
-            // Small delay to prevent tight looping
-            vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
+
 }
+
+void generate_new_question(int *pnum1, int *pnum2, char *pOperator, int *pCorrect_answer, GameMode game_mode) {
+    // Update the display buffer for non math solve mode
+    if(game_mode != MODE_SOLVE_MATH){
+    display_buffer[0] =  BLANK_CHAR_INDEX ;
+    display_buffer[1] = BLANK_CHAR_INDEX;
+    display_buffer[2] =  BLANK_CHAR_INDEX ;
+    display_buffer[3] =  BLANK_CHAR_INDEX;
+    }
+    
+    switch (game_mode) {
+        case MODE_SOLVE_MATH:
+            // Generate a math problem
+            do {
+                *pnum1 = generate_random(0, 9);
+                *pnum2 = generate_random(0, 9);
+                *pOperator = generate_operator();
+                *pCorrect_answer = calculate_answer(*pnum1, *pnum2, *pOperator, display_buffer); //also update display_buffer for operator
+            } while (*pCorrect_answer > 9 || *pCorrect_answer < 0);
+
+            display_buffer[0] =  *pnum1 ;
+            display_buffer[2] =  *pnum2 ;
+            display_buffer[3] =  *pCorrect_answer;
+            break;
+
+        case MODE_FIND_NUMBER:
+            // Generate a random number for the user to find
+            *pCorrect_answer = generate_random(0, 9);
+            *pnum1 = *pCorrect_answer; // Store the correct answer in pnum1 for display purposes
+            *pnum2 = 0; // Not used in this mode
+            *pOperator = ' '; // Not used in this mode
+            display_buffer[0] = *pCorrect_answer;
+            break;
+
+        case MODE_FREE:
+            // No question generation needed for free mode
+            *pnum1 = 0;
+            *pnum2 = 0;
+            *pOperator = ' ';
+            *pCorrect_answer = 0;
+            break;
+    }
+
+    ESP_LOGI("game", "%d %c %d = %d mode %d", *pnum1, *pOperator, *pnum2, *pCorrect_answer, game_mode);
+
+    
+    textChanged =1;
 }
+
+// Math game task
+// void math_game_task(void *pvParameters) {
+    
+//     keyboard_queue = xQueueCreate(10, sizeof(char));
+
+//     // Generate initial question
+//     generate_new_question(&num1, &num2, &operator, &correct_answer);
+    
+// while(game_active) {
+//     // Display current question
+//     printf("\nSolve: %d %c %d = %d ?\n", num1, operator, num2, correct_answer);
+//     // char status;
+//     while(1) {
+//         // Wait for character from keyboard queue
+//         if(xQueueReceive(keyboard_queue, &received_char, portMAX_DELAY) == pdTRUE) {
+//             if(received_char == 'M') {
+//                 generate_new_question(&num1, &num2, &operator, &correct_answer);
+//                 printf("new question is generated");
+//                 xQueueSend(audio_queue, (char[]){ 'n' }, (TickType_t)0);
+
+//                 // play_sound_with_debounce('n');
+//                 continue;
+//             }
+            
+//             int user_answer = received_char - '0'; // Convert ASCII to integer
+            
+//             if(user_answer == correct_answer) {
+//                 printf("\nCorrect! Well done!\n");
+//                 // play_sound_with_debounce('c');
+//                 xQueueSend(audio_queue, (char[]){ 'c' }, (TickType_t)0);
+
+//                 generate_new_question(&num1, &num2, &operator, &correct_answer);
+//                 break; // Exit inner loop after correct answer
+//             } else {
+//                 printf("\nIncorrect. Try again!\n");
+//                 // play_sound_with_debounce('f');
+//                 xQueueSend(audio_queue, (char[]){ 'f' }, (TickType_t)0);
+
+//             }
+            
+//             // Small delay to prevent tight looping
+//             vTaskDelay(pdMS_TO_TICKS(100));
+//         }
+//     }
+// }
+// }
 // Helper function to generate a new question
-static void generate_new_question(int *num1, int *num2, char *operator, int *correct_answer) {
-     // Ensure single-digit and positive answers 
-    do {   
-        *num1 = generate_random(0, 9);
-        *num2 = generate_random(0, 9);
-        *operator = generate_operator();
-        *correct_answer = calculate_answer(*num1, *num2, *operator, display_buffer);
-        display_buffer[0] = *num1;
-        display_buffer[2] = *num2;
-        display_buffer[3]  = *correct_answer;
+// static void generate_new_question(int *num1, int *num2, char *operator, int *correct_answer) {
+//      // Ensure single-digit and positive answers 
+//     do {   
+//         *num1 = generate_random(0, 9);
+//         *num2 = generate_random(0, 9);
+//         *operator = generate_operator();
+//         *correct_answer = calculate_answer(*num1, *num2, *operator, display_buffer);
+//         display_buffer[0] = *num1;
+//         display_buffer[2] = *num2;
+//         display_buffer[3]  = *correct_answer;
 
-    } while (*correct_answer > 9 || *correct_answer < 0);
-    textChanged = 1;
+//     } while (*correct_answer > 9 || *correct_answer < 0);
+//     textChanged = 1;
 
-}
+// }
 
 // Calculate answer based on operator
 static int calculate_answer(int num1, int num2, char operator, int *code_operator) {
@@ -466,17 +563,30 @@ void init_spiffs(){
 
 }
 
+void audio_task(){
+    char received_char;
+    audio_queue = xQueueCreate(10, sizeof(char));
+
+    while(1){
+    if(xQueueReceive(audio_queue, &received_char,pdMS_TO_TICKS(10))){
+        ESP_LOGI("audio", "%c", received_char);
+        play_sound_with_debounce(received_char);
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+}
+}
+
 void app_main(void)
 {   
     init_spiffs();
     init_i2s();
     gpio_init();
-    // display_init();
+
+
   
     xTaskCreate(gpio_task, "matrix task", 4096, NULL, 10, NULL);
-    // init_led_strip();
-    // led_task();
+    
     xTaskCreate(display_task, "display_task", 4096, NULL, 6, NULL);
-
+    xTaskCreate(audio_task, "audio_task", 4096, NULL, 4, NULL);
     xTaskCreate(math_game_task, "game_task", 4096 * 2, NULL, 5, NULL);
 }
