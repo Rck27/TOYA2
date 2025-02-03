@@ -96,6 +96,7 @@ void gpio_init(){
 }
 
 bool audioActive = 0;
+
 void play_sound(char sound_number) {
     if (xSemaphoreTake(audio_semaphore, pdMS_TO_TICKS(10)) != pdTRUE) {
         ESP_LOGI("audio", "Audio busy, skipping playback");
@@ -104,7 +105,6 @@ void play_sound(char sound_number) {
 
     audioActive = true;
     
-    // Create the full path
     char full_path[64];
     snprintf(full_path, sizeof(full_path), "/spiffs/%c.pcm", sound_number);
 
@@ -121,15 +121,13 @@ void play_sound(char sound_number) {
     size_t file_size = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    ESP_LOGI("I2S", "File size: %zu bytes", file_size);
+    ESP_LOGI("I2S", "Starting playback of file: %s, size: %zu bytes", full_path, file_size);
 
-    // Prepare playback buffer
-    int16_t buffer[DMA_BUF_LEN];  
-    size_t bytes_read = 0;
-    size_t bytes_written = 0;
-    size_t bytes_remaining = file_size;
+    // Stop and clear any previous playback
+    i2s_stop(I2S_NUM);
+    i2s_zero_dma_buffer(I2S_NUM);
 
-    // Start I2S playback
+    // Start I2S
     esp_err_t err = i2s_start(I2S_NUM);
     if (err != ESP_OK) {
         ESP_LOGE("I2S", "Failed to start I2S: %d", err);
@@ -139,37 +137,38 @@ void play_sound(char sound_number) {
         return;
     }
 
-    // Playback loop
-    while (bytes_remaining > 0) {
-        size_t chunk_size = (bytes_remaining < sizeof(buffer)) ? 
-                            bytes_remaining : sizeof(buffer);
-        bytes_read = fread(buffer, 1, chunk_size, f);
+    // Use DMA buffer size for our read buffer
+    int16_t buffer[1024];  // matches dma_buf_len
+    size_t total_bytes_written = 0;
 
-        if (bytes_read == 0) {
-            ESP_LOGE("I2S", "Error or end of file reached.");
-            break;
-        }
+    while (total_bytes_written < file_size) {
+        size_t bytes_read = fread(buffer, 1, sizeof(buffer), f);
+        if (bytes_read == 0) break;
 
-        // Optional: Adjust volume or process data
-        for (size_t i = 0; i < bytes_read / sizeof(int16_t); i++) {
-            buffer[i] = buffer[i] << 2;
-        }
-
+        size_t bytes_written = 0;
         err = i2s_write(I2S_NUM, buffer, bytes_read, &bytes_written, portMAX_DELAY);
         if (err != ESP_OK) {
             ESP_LOGE("I2S", "Error writing to I2S: %d", err);
             break;
         }
 
-        bytes_remaining -= bytes_read;
+        total_bytes_written += bytes_written;
+        
+        // Small delay to prevent watchdog triggers
+        vTaskDelay(1);
     }
 
-    // Stop I2S playback
-    i2s_stop(I2S_NUM);
+    // Wait for the last buffer to be played
+    // For 16kHz audio, calculate delay based on remaining bytes
+    int remaining_audio_ms = (file_size - total_bytes_written) * 1000 / (16000 * 2);
+    vTaskDelay(pdMS_TO_TICKS(remaining_audio_ms + 20));
 
-    // Cleanup
+    i2s_stop(I2S_NUM);
+    i2s_zero_dma_buffer(I2S_NUM);
     fclose(f);
-    ESP_LOGI("I2S", "Playback finished for file: %s", full_path);
+    
+    ESP_LOGI("I2S", "Playback finished. Total bytes written: %zu of %zu", 
+             total_bytes_written, file_size);
     
     audioActive = false;
     xSemaphoreGive(audio_semaphore);
@@ -202,9 +201,9 @@ void gpio_task(void *pvParameters) {
                         ESP_LOGI("gpio", "Key released: %c", character[row][col] );
                         
                         
-                        xQueueSend(keyboard_queue, &character[row][col], (TickType_t)0);
-                        vTaskDelay(pdMS_TO_TICKS(50)); // 50 milliseconds delay
-                        xQueueSend(audio_queue, &character[row][col], (TickType_t)0);
+                        xQueueSend(keyboard_queue, &character[row][col], (TickType_t)200);
+                        vTaskDelay(pdMS_TO_TICKS(500)); // 50 milliseconds delay
+                        xQueueSend(audio_queue, &character[row][col], (TickType_t)100);
 
                         
                     }
@@ -364,7 +363,7 @@ while (game_active) {
                             break; // Exit inner loop after correct answer
                         } else {
                             printf("\nIncorrect. Try again!\n");
-                            xQueueSend(audio_queue, (char[]){ 'f' }, (TickType_t)0);
+                            xQueueSend(audio_queue, (char[]){ 'w' }, (TickType_t)0);
                         }
                         break;
                     }
@@ -378,7 +377,7 @@ while (game_active) {
                             break; // Exit inner loop after correct answer
                         } else {
                             printf("\nIncorrect. Try again!\n");
-                            xQueueSend(audio_queue, (char[]){ 'f' }, (TickType_t)0);
+                            xQueueSend(audio_queue, (char[]){ 'w' }, (TickType_t)0);
                         }
                         break;
                     }

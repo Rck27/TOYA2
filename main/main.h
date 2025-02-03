@@ -22,7 +22,7 @@ const gpio_num_t row_pins[NUM_ROWS]= {19, 17, 16};
 #define I2S_WS_IO       GPIO_NUM_33
 #define I2S_DO_IO       GPIO_NUM_26
 #define SAMPLE_RATE     8000
-#define DMA_BUF_COUNT   3
+#define DMA_BUF_COUNT   2
 #define DMA_BUF_LEN     1024
 
 // Audio file configuration
